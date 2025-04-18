@@ -1,0 +1,5 @@
+discord.py
+aiohttp
+pytz
+python-dotenv
+colorama
