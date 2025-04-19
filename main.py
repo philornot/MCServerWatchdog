@@ -35,6 +35,9 @@ last_seen = {}
 # Zapamiętana maksymalna liczba graczy na serwerze
 max_players = 20
 
+# Czas ostatniego znanego stanu online serwera
+last_known_online_time = None
+
 # Inicjalizacja bota
 intents = discord.Intents.default()
 intents.message_content = True
@@ -69,7 +72,8 @@ def save_bot_data():
     data = {
         "last_embed_id": last_embed_id,
         "last_seen": last_seen,
-        "max_players": max_players
+        "max_players": max_players,
+        "last_known_online_time": last_known_online_time
     }
     try:
         with open(DATA_FILE, "wb") as f:
@@ -86,7 +90,7 @@ def load_bot_data():
     Funkcja wczytuje zapisane wcześniej dane bota z pliku.
     Jeśli plik nie istnieje lub wystąpi błąd, dane pozostają niezmienione.
     """
-    global last_embed_id, last_seen, max_players
+    global last_embed_id, last_seen, max_players, last_known_online_time
     try:
         if os.path.exists(DATA_FILE):
             with open(DATA_FILE, "rb") as f:
@@ -101,10 +105,16 @@ def load_bot_data():
                 if stored_max_players:
                     max_players = stored_max_players
 
+                # Wczytaj czas ostatniego stanu online
+                stored_last_known_online_time = data.get("last_known_online_time")
+                if stored_last_known_online_time:
+                    last_known_online_time = stored_last_known_online_time
+
                 logger.debug("DataStorage", f"Załadowano dane bota z {DATA_FILE}",
                              last_embed_id=last_embed_id,
                              players_count=len(last_seen),
                              max_players=max_players,
+                             last_online=format_time(last_known_online_time) if last_known_online_time else "brak",
                              log_type="CONFIG")
         else:
             logger.debug("DataStorage", f"Nie znaleziono pliku danych {DATA_FILE}", log_type="CONFIG")
@@ -141,13 +151,16 @@ async def check_minecraft_server():
 
     Funkcja łączy się z API mcsrvstat.us aby pobrać informacje o stanie serwera.
     Wykonuje dodatkową weryfikację prawdziwego statusu serwera poprzez analizę
-    wiadomości MOTD i wersji. Aktualizuje również zapamiętaną maksymalną liczbę
-    graczy, jeśli serwer jest online.
+    wiadomości MOTD i wersji. Implementuje także mechanizm stabilizacji statusu,
+    aby zapobiec fałszywym raportom offline/online.
 
     Returns:
         dict: Słownik zawierający informacje o serwerze, w tym jego prawdziwy status
     """
-    global max_players
+    global max_players, last_known_online_time, last_seen
+
+    # Przechowujemy czas ostatniego znanego stanu online
+    current_time = get_warsaw_time()
     api_url = f"https://api.mcsrvstat.us/2/{MC_SERVER_ADDRESS}:{MC_SERVER_PORT}"
 
     try:
@@ -159,19 +172,21 @@ async def check_minecraft_server():
                     data = await response.json()
                     logger.api_request(api_url, response=data, status=response.status)
 
-                    # Weryfikacja prawdziwego statusu serwera
-                    if data.get("online", False):
-                        # Sprawdź dodatkowe wskaźniki statusu serwera
+                    # Zapisz maksymalną liczbę graczy, jeśli jest dostępna
+                    players_data = data.get("players", {})
+                    if players_data and "max" in players_data and players_data["max"] > 0:
+                        max_players = players_data["max"]
+                        logger.debug("ServerCheck", f"Zaktualizowano maksymalną liczbę graczy: {max_players}",
+                                     log_type="DATA")
+
+                    # Dodatkowe sprawdzenia wiarygodności statusu
+                    reported_online = data.get("online", False)
+
+                    # Weryfikacja statusu na podstawie MOTD i wersji
+                    if reported_online:
                         motd_clean = data.get("motd", {}).get("clean", [""])
                         motd_text = motd_clean[0].lower() if motd_clean else ""
                         version_text = data.get("version", "").lower()
-
-                        # Zapisz maksymalną liczbę graczy, jeśli serwer jest faktycznie online
-                        players_data = data.get("players", {})
-                        if players_data and "max" in players_data and players_data["max"] > 0:
-                            max_players = players_data["max"]
-                            logger.debug("ServerCheck", f"Zaktualizowano maksymalną liczbę graczy: {max_players}",
-                                         log_type="DATA")
 
                         # Jeśli MOTD lub wersja wskazują, że serwer jest offline, nadpisz status online
                         if "offline" in motd_text or "offline" in version_text:
@@ -181,6 +196,52 @@ async def check_minecraft_server():
                                          motd=motd_text,
                                          version=version_text)
                             data["online"] = False
+                            reported_online = False
+
+                    # Mechanizm stabilizacji statusu - sprawdź listę graczy i ostatnie czasy aktywności
+                    player_list = data.get("players", {}).get("list", []) if reported_online else []
+
+                    # Jeśli API raportuje online i mamy graczy, aktualizuj czas ostatniego znanego stanu online
+                    if reported_online and player_list:
+                        last_known_online_time = current_time
+                        logger.debug("ServerCheck", "Serwer online z graczami, aktualizacja czasu online",
+                                     log_type="DATA")
+
+                    # Jeśli API raportuje offline, ale widzieliśmy graczy w ostatnich 5 minutach, uznaj serwer za online
+                    elif not reported_online and last_known_online_time:
+                        time_difference = (current_time - last_known_online_time).total_seconds() / 60
+
+                        # Jeśli ostatnia aktywność była mniej niż 5 minut temu, nadal uznajemy serwer za online
+                        if time_difference < 5:
+                            # Sprawdź, czy mamy aktywnych graczy w ciągu ostatnich 5 minut
+                            recent_players = False
+                            for player, last_time in last_seen.items():
+                                player_time_diff = (current_time - last_time).total_seconds() / 60
+                                if player_time_diff < 5:
+                                    recent_players = True
+                                    break
+
+                            if recent_players:
+                                logger.debug("ServerCheck",
+                                             f"API zgłasza offline, ale widzieliśmy graczy w ciągu ostatnich 5 minut. Wymuszam status online.",
+                                             log_type="API",
+                                             last_online_time=format_time(last_known_online_time),
+                                             time_diff=time_difference)
+                                data["online"] = True
+
+                                # Odtwarzamy dane o graczach z ostatniego znanego stanu
+                                if "players" not in data:
+                                    data["players"] = {}
+
+                                active_players = []
+                                for player, last_time in last_seen.items():
+                                    player_time_diff = (current_time - last_time).total_seconds() / 60
+                                    if player_time_diff < 5:
+                                        active_players.append(player)
+
+                                if active_players:
+                                    data["players"]["online"] = len(active_players)
+                                    data["players"]["list"] = active_players
 
                     # Logowanie szczegółowych informacji o serwerze
                     if data.get("online", False):
@@ -217,7 +278,12 @@ async def update_last_seen(online_players):
     Returns:
         dict: Zaktualizowany słownik z informacjami o ostatnio widzianych graczach
     """
+    global last_seen, last_known_online_time
     current_time = get_warsaw_time()
+
+    # Jeśli są jacyś gracze online, zaktualizuj czas ostatniego stanu online
+    if online_players:
+        last_known_online_time = current_time
 
     # Pobierz aktualną listę graczy, którzy są zapisani w last_seen
     known_players = set(last_seen.keys())
@@ -268,7 +334,7 @@ def create_minecraft_embed(server_data, last_seen_data):
                  raw_server_data=server_data)
 
     # Sprawdź czy wystąpił błąd API
-    if "error" in server_data:
+    if "error" in server_data and "online" not in server_data:
         # Tworzenie embeda z informacją o błędzie
         embed = discord.Embed(
             title=f"Status serwera Minecraft: {MC_SERVER_ADDRESS}",
@@ -486,8 +552,8 @@ async def check_server():
     Zadanie cyklicznie sprawdzające stan serwera i aktualizujące informacje.
 
     Ta funkcja jest wywoływana co 5 minut. Pobiera aktualny stan serwera,
-    aktualizuje informacje o graczach i edytuje istniejący embed lub tworzy
-    nowy, jeśli poprzedni nie istnieje.
+    aktualizuje informacje o graczach i edytuje istniejący embed zamiast
+    tworzenia nowych wiadomości.
     """
     global last_embed_id
 
@@ -510,64 +576,30 @@ async def check_server():
         # Utwórz nowy embed
         embed = create_minecraft_embed(server_data, last_seen)
 
-        icon_file = None
+        # Ikona serwera (tylko do przechowywania, nie będziemy wysyłać jako załącznik)
+        server_icon = None
         if server_data.get("online", False) and "icon" in server_data:
             try:
-                # Pobierz dane ikony
                 icon_base64 = server_data["icon"].split(',')[-1] if "," in server_data["icon"] else server_data["icon"]
-
                 # Napraw padding Base64 jeśli potrzeba
-                # Base64 powinien mieć długość podzielną przez 4
                 padding = 4 - (len(icon_base64) % 4) if len(icon_base64) % 4 else 0
                 icon_base64 += "=" * padding
-
-                try:
-                    # Dekoduj Base64 do danych binarnych
-                    icon_data = base64.b64decode(icon_base64)
-                    # Stwórz plik z danymi
-                    icon_buffer = io.BytesIO(icon_data)
-                    icon_buffer.seek(0)
-                    # Stwórz plik Discord z bufora
-                    icon_file = File(icon_buffer, filename="server_icon.png")
-                    logger.debug("Embed", "Przygotowano plik ikony serwera")
-                except Exception as e:
-                    logger.warning("Embed", f"Nie udało się zdekodować ikony serwera: {e}")
-                    icon_file = None
+                # Dekoduj i przechowuj jako dane binarne (nie tworzymy załącznika)
+                server_icon = base64.b64decode(icon_base64)
+                logger.debug("Embed", "Przygotowano dane ikony serwera")
             except Exception as e:
-                logger.warning("Embed", f"Nie udało się przygotować ikony serwera: {e}")
-                icon_file = None
+                logger.warning("Embed", f"Nie udało się zdekodować ikony serwera: {e}")
+                server_icon = None
 
-        # Strategia: zawsze edytuj istniejącą wiadomość, chyba że mamy nową ikonę lub wiadomość nie istnieje
+        # Strategia: zawsze edytuj istniejącą wiadomość, nie usuwaj i nie twórz nowej
         if last_embed_id:
             try:
                 message = await channel.fetch_message(last_embed_id)
-
-                # Czy potrzebujemy nowej wiadomości z powodu zmiany ikony?
-                need_new_message = False
-
-                # Sprawdź, czy obecna wiadomość ma już załącznik ikony
-                has_attachment = len(message.attachments) > 0
-
-                # Jeśli mamy ikonę, a wiadomość nie ma załącznika, lub odwrotnie
-                if (icon_file and not has_attachment) or (not icon_file and has_attachment):
-                    need_new_message = True
-                    logger.debug("Discord", "Potrzebna nowa wiadomość z powodu zmiany stanu ikony",
-                                 log_type="DISCORD",
-                                 has_icon=bool(icon_file),
-                                 has_attachment=has_attachment)
-
-                if need_new_message:
-                    # Usuń starą wiadomość i utwórz nową
-                    await message.delete()
-                    logger.info("Discord", f"Usunięto wiadomość (ID: {last_embed_id}) aby dodać/usunąć ikonę",
-                                log_type="DISCORD")
-                    last_embed_id = None
-                else:
-                    # Edytuj istniejącą wiadomość
-                    await message.edit(embed=embed)
-                    logger.discord_message("edited", last_embed_id, channel=channel.name)
-                    save_bot_data()  # Zapisz dane po aktualizacji
-                    return
+                # Zawsze edytuj istniejącą wiadomość, nawet jeśli zmienia się ikona
+                await message.edit(embed=embed)
+                logger.discord_message("edited", last_embed_id, channel=channel.name)
+                save_bot_data()  # Zapisz dane po aktualizacji
+                return
             except discord.NotFound:
                 logger.warning("Discord", f"Wiadomość o ID {last_embed_id} nie została znaleziona. Wysyłam nową.",
                                log_type="DISCORD")
@@ -576,16 +608,10 @@ async def check_server():
                 logger.error("Discord", f"Błąd podczas edycji wiadomości: {e}.", log_type="DISCORD")
                 last_embed_id = None
 
-        # Jeśli doszliśmy tutaj, musimy wysłać nową wiadomość
-        if icon_file:
-            # Ustaw miniaturkę z URL załącznika
-            embed.set_thumbnail(url=f"attachment://server_icon.png")
-            message = await channel.send(file=icon_file, embed=embed)
-            logger.discord_message("sent", message.id, channel=channel.name, content="z ikoną serwera")
-        else:
-            message = await channel.send(embed=embed)
-            logger.discord_message("sent", message.id, channel=channel.name)
-
+        # Jeśli doszliśmy tutaj, musimy wysłać nową wiadomość (np. pierwsza lub poprzednia usunięta)
+        # Wysyłamy zawsze bez załącznika ikony, aby uniknąć usuwania wiadomości w przyszłości
+        message = await channel.send(embed=embed)
+        logger.discord_message("sent", message.id, channel=channel.name)
         last_embed_id = message.id
 
         # Zapisz dane po wysłaniu nowej wiadomości
