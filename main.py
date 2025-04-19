@@ -387,9 +387,6 @@ def create_minecraft_embed(server_data, last_seen_data):
             embed.add_field(name="Ostatnio widziani:", value=f"```{last_seen_text}```", inline=False)
             logger.debug("Embed", "Dodano listę ostatnio widzianych graczy", offline_players=offline_players)
 
-    # Dodaj informację o czasie ostatniego sprawdzenia
-    embed.set_footer(text=f"Today at {current_time.strftime('%H:%M')}")
-
     return embed
 
 
