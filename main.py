@@ -1,13 +1,17 @@
-import discord
-from discord import app_commands
-from discord.ext import commands, tasks
-import aiohttp
-import json
+import base64
 import datetime
-import pytz
+import io
 import os
 import pickle
+
+import aiohttp
+import discord
+import pytz
+from discord import File
+from discord import app_commands
+from discord.ext import tasks
 from dotenv import load_dotenv
+
 from pretty_logger import PrettyLogger
 
 # Załaduj zmienne środowiskowe z pliku .env
@@ -89,7 +93,7 @@ def get_warsaw_time():
 
 def format_time(dt):
     """Formatuje datę i czas w czytelny sposób."""
-    return dt.strftime("%d-%m-%Y %H:%M:%S")
+    return dt.strftime("%H:%M:%S %d-%m-%Y")
 
 
 async def check_minecraft_server():
@@ -114,6 +118,10 @@ async def check_minecraft_server():
                     return data
                 else:
                     error_msg = f"API Error: {response.status}"
+                    # Dla kodu 429 dodaj bardziej przyjazną wiadomość
+                    if response.status == 429:
+                        error_msg = "Zbyt wiele zapytań do API (kod 429). Proszę spróbować ponownie za chwilę."
+
                     logger.api_request(api_url, status=response.status, error=error_msg)
                     return {"online": False, "error": error_msg}
     except Exception as e:
@@ -161,15 +169,52 @@ def create_minecraft_embed(server_data, last_seen_data):
     logger.debug("EmbedCreation", "Rozpoczęcie tworzenia embeda",
                  raw_server_data=server_data)
 
+    # Sprawdź czy wystąpił błąd API
+    if "error" in server_data:
+        # Tworzenie embeda z informacją o błędzie
+        embed = discord.Embed(
+            title=f"Status serwera Minecraft: {MC_SERVER_ADDRESS}",
+            color=discord.Color.light_gray(),
+            timestamp=current_time
+        )
+
+        # Dodaj informację o błędzie
+        error_msg = server_data.get("error", "Nieznany błąd")
+        embed.add_field(name="⚠️ Błąd API", value=f"```{error_msg}```", inline=False)
+        embed.add_field(name="Status", value="Nieznany (błąd API)", inline=False)
+
+        # Dodaj ostatnio widzianych graczy, jeśli są dostępni
+        if last_seen_data:
+            last_seen_text = ""
+            offline_players = []
+
+            for player, last_time in last_seen_data.items():
+                last_seen_text += f"{player}: {format_time(last_time)}\n"
+                offline_players.append(f"{player}: {format_time(last_time)}")
+
+            if last_seen_text:
+                embed.add_field(name="Ostatnio widziani:", value=f"```{last_seen_text}```", inline=False)
+                logger.debug("Embed", "Dodano listę ostatnio widzianych graczy", offline_players=offline_players)
+
+        # Dodaj stopkę z informacją, kiedy zostanie wykonane następne sprawdzenie
+        next_check_time = current_time + datetime.timedelta(minutes=5)
+        embed.set_footer(text=f"Następne sprawdzenie: {format_time(next_check_time)}")
+
+        return embed
+
+    # Standardowy kod dla poprawnej odpowiedzi
+    # Sprawdź rzeczywisty status serwera
+    is_online = server_data.get("online", False)
+
     # Dodane dodatkowe logowanie dla graczy
-    player_list = server_data.get("players", {}).get("list", [])
+    player_list = server_data.get("players", {}).get("list", []) if is_online else []
     logger.debug("EmbedCreation", f"Lista graczy z API: {player_list}",
                  player_count=len(player_list),
                  player_data=server_data.get("players", {}))
 
     # Ustawienie koloru embeda
-    if server_data.get("online", False):
-        if server_data.get("players", {}).get("online", 0) > 0:
+    if is_online:
+        if player_list:
             color = discord.Color.green()  # Serwer online z graczami
             logger.debug("Embed", "Tworzenie zielonego embeda (serwer online z graczami)")
         else:
@@ -187,72 +232,62 @@ def create_minecraft_embed(server_data, last_seen_data):
     )
 
     # Status serwera
-    status = "ONLINE" if server_data.get("online", False) else "OFFLINE"
+    status = "🟢 ONLINE" if is_online else "🔴 OFFLINE"
     embed.add_field(name="Status", value=status, inline=False)
 
-    # Jeśli serwer jest online, dodaj więcej informacji
-    if server_data.get("online", False):
-        # Wersja
-        version = server_data.get("version", "Nieznana")
-        embed.add_field(name="Wersja", value=version, inline=True)
+    # Liczba graczy (niezależnie czy serwer online czy nie)
+    players_online = server_data.get("players", {}).get("online", 0) if is_online else 0
+    players_max = server_data.get("players", {}).get("max", 0) if is_online else 0
+    embed.add_field(name="Gracze", value=f"{players_online}/{players_max}", inline=True)
 
-        # Liczba graczy
-        players_online = server_data.get("players", {}).get("online", 0)
-        players_max = server_data.get("players", {}).get("max", 0)
-        embed.add_field(name="Gracze", value=f"{players_online}/{players_max}", inline=True)
+    # Lista graczy
+    if is_online and player_list:
+        # Dodajmy numerację graczy dla lepszej czytelności
+        players_value = ""
+        for idx, player in enumerate(player_list, 1):
+            players_value += f"{idx}. {player}\n"
 
-        # Lista graczy
-        if player_list:
-            # Dodajmy numerację graczy dla lepszej czytelności
-            players_value = ""
-            for idx, player in enumerate(player_list, 1):
-                players_value += f"{idx}. {player}\n"
+        # Dodajmy informację o liczbie graczy w nazwie pola
+        player_count = len(player_list)
+        field_name = f"Lista graczy online ({player_count})"
 
-            # Dodajmy informację o liczbie graczy w nazwie pola
-            player_count = len(player_list)
-            field_name = f"Lista graczy online ({player_count})"
+        # Sprawdźmy długość listy graczy - Discord ma limity na pola embed
+        if len(players_value) > 900:  # Bezpieczny limit dla wartości pola embed
+            # Jeśli lista jest zbyt długa, podzielmy ją
+            first_part = ""
+            for idx, player in enumerate(player_list[:5], 1):  # Pokaż tylko pierwszych 5
+                first_part += f"{idx}. {player}\n"
 
-            # Sprawdźmy długość listy graczy - Discord ma limity na pola embed
-            if len(players_value) > 900:  # Bezpieczny limit dla wartości pola embed
-                # Jeśli lista jest zbyt długa, podzielmy ją
-                first_part = ""
-                for idx, player in enumerate(player_list[:5], 1):  # Pokaż tylko pierwszych 5
-                    first_part += f"{idx}. {player}\n"
-
-                embed.add_field(name=field_name, value=f"```{first_part}... i {player_count - 5} więcej```",
-                                inline=False)
-                logger.debug("Embed", f"Lista graczy jest zbyt długa, pokazuję tylko 5 pierwszych z {player_count}",
-                             players=player_list)
-            else:
-                # Standardowo pokazujemy wszystkich graczy
-                embed.add_field(name=field_name, value=f"```{players_value}```", inline=False)
-                logger.debug("Embed", f"Dodano {player_count} graczy do listy", players=player_list)
-
-            # Dodajmy dodatkowe logowanie dla każdego gracza
-            for player in player_list:
-                logger.debug("EmbedPlayer", f"Dodawanie gracza do embeda: {player}")
+            embed.add_field(name=field_name, value=f"```{first_part}... i {player_count - 5} więcej```", inline=False)
+            logger.debug("Embed", f"Lista graczy jest zbyt długa, pokazuję tylko 5 pierwszych z {player_count}",
+                         players=player_list)
         else:
-            embed.add_field(name="Lista graczy online", value="Brak graczy online", inline=False)
-            logger.debug("Embed", "Brak graczy online")
+            # Standardowo pokazujemy wszystkich graczy
+            embed.add_field(name=field_name, value=f"```{players_value}```", inline=False)
+            logger.debug("Embed", f"Dodano {player_count} graczy do listy", players=player_list)
 
-        # Ostatnio widziani gracze
-        if last_seen_data:
-            last_seen_text = ""
-            offline_players = []
+        # Dodajmy dodatkowe logowanie dla każdego gracza
+        for player in player_list:
+            logger.debug("EmbedPlayer", f"Dodawanie gracza do embeda: {player}")
+    else:
+        embed.add_field(name="Lista graczy online", value="Brak graczy online", inline=False)
+        logger.debug("Embed", "Brak graczy online")
 
-            for player, last_time in last_seen_data.items():
-                if player not in player_list:  # Tylko gracze, którzy nie są obecnie online
-                    last_seen_text += f"{player}: {format_time(last_time)}\n"
-                    offline_players.append(f"{player}: {format_time(last_time)}")
+    # Ostatnio widziani gracze
+    if last_seen_data:
+        last_seen_text = ""
+        offline_players = []
 
-            if last_seen_text:
-                embed.add_field(name="Ostatnio widziani", value=f"```{last_seen_text}```", inline=False)
-                logger.debug("Embed", "Dodano listę ostatnio widzianych graczy", offline_players=offline_players)
+        for player, last_time in last_seen_data.items():
+            if not is_online or player not in player_list:  # Wszyscy gracze gdy serwer offline, albo tylko nieobecni gdy online
+                last_seen_text += f"{player}: {format_time(last_time)}\n"
+                offline_players.append(f"{player}: {format_time(last_time)}")
 
-    # Stopka z czasem ostatniej aktualizacji
-    embed.set_footer(text=f"Ostatnia aktualizacja: {format_time(current_time)}")
-    logger.debug("Embed", f"Utworzono embed z czasem aktualizacji: {format_time(current_time)}")
+        if last_seen_text:
+            embed.add_field(name="Ostatnio widziani:", value=f"```{last_seen_text}```", inline=False)
+            logger.debug("Embed", "Dodano listę ostatnio widzianych graczy", offline_players=offline_players)
 
+    # Nie dodajemy już stopki z czasem, ponieważ embed ma już timestamp
     return embed
 
 
@@ -356,13 +391,49 @@ async def check_server():
         # Utwórz nowy embed
         embed = create_minecraft_embed(server_data, last_seen)
 
+        icon_file = None
+        if server_data.get("online", False) and "icon" in server_data:
+            try:
+                # Pobierz dane ikony
+                icon_base64 = server_data["icon"]
+
+                # Napraw padding Base64 jeśli potrzeba
+                # Base64 powinien mieć długość podzielną przez 4
+                padding = 4 - (len(icon_base64) % 4) if len(icon_base64) % 4 else 0
+                icon_base64 += "=" * padding
+
+                try:
+                    # Dekoduj Base64 do danych binarnych
+                    icon_data = base64.b64decode(icon_base64)
+                    # Stwórz plik z danymi
+                    icon_buffer = io.BytesIO(icon_data)
+                    icon_buffer.seek(0)
+                    # Stwórz plik Discord z bufora
+                    icon_file = File(icon_buffer, filename="server_icon.png")
+                    logger.debug("Embed", "Przygotowano plik ikony serwera")
+                except Exception as e:
+                    logger.warning("Embed", f"Nie udało się zdekodować ikony serwera: {e}")
+                    icon_file = None
+            except Exception as e:
+                logger.warning("Embed", f"Nie udało się przygotować ikony serwera: {e}")
+                icon_file = None
+
         # Jeśli istnieje już embed, spróbuj go zaktualizować
         if last_embed_id:
             try:
                 message = await channel.fetch_message(last_embed_id)
-                await message.edit(embed=embed)
-                logger.discord_message("edited", last_embed_id, channel=channel.name)
-                return
+                if icon_file:
+                    # Jeśli mamy nową ikonę, musimy utworzyć nową wiadomość
+                    # Discord nie pozwala na edycję załączników
+                    await message.delete()
+                    logger.info("Discord", f"Usunięto wiadomość (ID: {last_embed_id}) aby dodać ikonę",
+                                log_type="DISCORD")
+                    last_embed_id = None
+                else:
+                    # Jeśli nie mamy ikony, możemy edytować istniejący embed
+                    await message.edit(embed=embed)
+                    logger.discord_message("edited", last_embed_id, channel=channel.name)
+                    return
             except discord.NotFound:
                 logger.warning("Discord", f"Wiadomość o ID {last_embed_id} nie została znaleziona. Wysyłam nową.",
                                log_type="DISCORD")
@@ -372,9 +443,16 @@ async def check_server():
                 last_embed_id = None
 
         # Jeśli nie ma poprzedniego embeda lub wystąpił błąd, wyślij nowy
-        message = await channel.send(embed=embed)
+        if icon_file:
+            # Ustaw miniaturkę z URL załącznika
+            embed.set_thumbnail(url=f"attachment://server_icon.png")
+            message = await channel.send(file=icon_file, embed=embed)
+            logger.discord_message("sent", message.id, channel=channel.name, content="z ikoną serwera")
+        else:
+            message = await channel.send(embed=embed)
+            logger.discord_message("sent", message.id, channel=channel.name)
+
         last_embed_id = message.id
-        logger.discord_message("sent", last_embed_id, channel=channel.name)
 
         # Zapisz dane po wysłaniu nowej wiadomości
         save_bot_data()
@@ -383,14 +461,14 @@ async def check_server():
         logger.critical("Tasks", f"Wystąpił błąd w funkcji check_server: {e}", log_type="BOT")
 
 
-# Definicja komendy slash (/mcsv)
+# Definicja komendy slash (/ski)
 @tree.command(
-    name="mcsv",
+    name="ski",
     description="Sprawdza aktualny stan serwera Minecraft"
 )
 async def mc_server_command(interaction: discord.Interaction):
     """Komenda slash do ręcznego sprawdzenia stanu serwera."""
-    logger.info("Commands", f"Użytkownik {interaction.user.name} użył komendy /mcsv", log_type="BOT")
+    logger.info("Commands", f"Użytkownik {interaction.user.name} użył komendy /ski", log_type="BOT")
 
     # Sprawdź, czy jesteśmy na właściwym kanale
     if interaction.channel_id != CHANNEL_ID:
