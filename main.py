@@ -1,13 +1,11 @@
 import base64
 import datetime
-import io
 import os
 import pickle
 
 import aiohttp
 import discord
 import pytz
-from discord import File
 from discord import app_commands
 from discord.ext import tasks
 from dotenv import load_dotenv
@@ -126,6 +124,10 @@ def get_bot_version():
     """
     Odczytuje wersję bota z pliku version.txt lub zwraca wersję developerską.
 
+    Jeśli plik version.txt istnieje (generowany przez GitHub Actions),
+    funkcja odczytuje wersję z pliku. W przeciwnym razie zwraca
+    informację, że jest to wersja developerska.
+
     Returns:
         str: Wersja bota
     """
@@ -139,8 +141,10 @@ def get_bot_version():
         return "unknown"
 
 
-# Dodaj zmienną globalną przechowującą wersję
+# Zmiennej globalna przechowująca wersję
 BOT_VERSION = get_bot_version()
+logger.info("Version", f"Uruchamianie bota w wersji: {BOT_VERSION}", log_type="CONFIG")
+
 
 def get_warsaw_time():
     """
@@ -169,17 +173,21 @@ async def check_minecraft_server():
     """
     Sprawdza status serwera Minecraft i zwraca dane w formie słownika.
 
-    Funkcja łączy się z API mcsrvstat.us aby pobrać informacje o stanie serwera.
-    Wykonuje dodatkową weryfikację prawdziwego statusu serwera poprzez analizę
-    wiadomości MOTD i wersji. Implementuje także mechanizm stabilizacji statusu,
-    aby zapobiec fałszywym raportom offline/online.
+    Funkcja łączy się z API mcsrvstat.us, aby pobrać informacje o stanie serwera.
+    Implementuje zaawansowane metody analizy stanu serwera, uwzględniając:
+    - Dane z API (status online, MOTD, wersja, liczba graczy)
+    - Historyczne dane o aktywności graczy
+    - Błędy zwracane przez API
+    - Czas od ostatniej znanej aktywności
+
+    Zapewnia stabilną i wiarygodną detekcję stanu serwera, nawet jeśli API
+    zwraca niepełne lub niespójne dane.
 
     Returns:
-        dict: Słownik zawierający informacje o serwerze, w tym jego prawdziwy status
+        dict: Słownik zawierający przetworzone informacje o serwerze i jego statusie
     """
     global max_players, last_known_online_time, last_seen
 
-    # Przechowujemy czas ostatniego znanego stanu online
     current_time = get_warsaw_time()
     api_url = f"https://api.mcsrvstat.us/2/{MC_SERVER_ADDRESS}:{MC_SERVER_PORT}"
 
@@ -192,95 +200,219 @@ async def check_minecraft_server():
                     data = await response.json()
                     logger.api_request(api_url, response=data, status=response.status)
 
-                    # Zapisz maksymalną liczbę graczy, jeśli jest dostępna
-                    players_data = data.get("players", {})
-                    if players_data and "max" in players_data and players_data["max"] > 0:
-                        max_players = players_data["max"]
+                    # ===== FAZA 1: Zbieranie wskaźników stanu =====
+
+                    # Podstawowy status z API
+                    reported_online = data.get("online", False)
+
+                    # Analiza wiadomości MOTD
+                    motd_indicates_offline = False
+                    if "motd" in data and "clean" in data["motd"] and data["motd"]["clean"]:
+                        motd_text = " ".join(data["motd"]["clean"]).lower()
+                        motd_indicates_offline = any(
+                            keyword in motd_text for keyword in ["offline", "wyłączony", "niedostępny", "unavailable"])
+
+                    # Analiza wersji
+                    version_indicates_offline = False
+                    if "version" in data:
+                        version_text = data.get("version", "").lower()
+                        version_indicates_offline = any(
+                            keyword in version_text for keyword in ["offline", "none", "● offline"])
+
+                    # Zapisz maksymalną liczbę graczy, jeśli dostępna
+                    if "players" in data and "max" in data["players"] and data["players"]["max"] > 0:
+                        max_players = data["players"]["max"]
                         logger.debug("ServerCheck", f"Zaktualizowano maksymalną liczbę graczy: {max_players}",
                                      log_type="DATA")
 
-                    # Dodatkowe sprawdzenia wiarygodności statusu
-                    reported_online = data.get("online", False)
+                    # Sprawdź błędy w odpowiedzi API
+                    api_errors = []
+                    if "debug" in data and "error" in data["debug"]:
+                        error_data = data["debug"]["error"]
+                        if isinstance(error_data, dict):
+                            api_errors = list(error_data.values())
+                        elif isinstance(error_data, str):
+                            api_errors = [error_data]
 
-                    # Weryfikacja statusu na podstawie MOTD i wersji
-                    if reported_online:
-                        motd_clean = data.get("motd", {}).get("clean", [""])
-                        motd_text = motd_clean[0].lower() if motd_clean else ""
-                        version_text = data.get("version", "").lower()
+                    # Wykryj graczy online według API
+                    api_players = []
+                    api_player_count = 0
+                    if reported_online and "players" in data:
+                        if "list" in data["players"]:
+                            api_players = data["players"]["list"]
+                        api_player_count = data["players"].get("online", len(api_players))
 
-                        # Jeśli MOTD lub wersja wskazują, że serwer jest offline, nadpisz status online
-                        if "offline" in motd_text or "offline" in version_text:
-                            logger.debug("ServerCheck",
-                                         "Serwer zgłoszony jako online, ale MOTD/wersja wskazuje na offline. Nadpisuję status.",
-                                         log_type="API",
-                                         motd=motd_text,
-                                         version=version_text)
-                            data["online"] = False
-                            reported_online = False
+                    # ===== FAZA 2: Analiza historycznych danych =====
 
-                    # Mechanizm stabilizacji statusu - sprawdź listę graczy i ostatnie czasy aktywności
-                    player_list = data.get("players", {}).get("list", []) if reported_online else []
+                    # Sprawdź, kiedy ostatnio widziano graczy
+                    recent_player_activity = False
+                    active_players = []
+                    most_recent_time = None
 
-                    # Jeśli API raportuje online i mamy graczy, aktualizuj czas ostatniego znanego stanu online
-                    if reported_online and player_list:
+                    for player, player_time in last_seen.items():
+                        time_diff = (current_time - player_time).total_seconds() / 60
+
+                        # Gracze widziani w ciągu ostatnich 5 minut są uznawani za aktywnych
+                        if time_diff < 5:
+                            recent_player_activity = True
+                            active_players.append(player)
+
+                            if most_recent_time is None or player_time > most_recent_time:
+                                most_recent_time = player_time
+
+                    # Status ostatniej znanej aktywności online
+                    recent_server_activity = False
+                    if last_known_online_time:
+                        server_time_diff = (current_time - last_known_online_time).total_seconds() / 60
+                        if server_time_diff < 5:
+                            recent_server_activity = True
+
+                    # ===== FAZA 3: Inteligentne ustalenie statusu =====
+
+                    # Domyślnie przyjmujemy status z API
+                    actual_online = reported_online
+
+                    # Wskaźniki negatywne - sugerują, że serwer jest offline
+                    negative_indicators = [
+                        not reported_online,
+                        motd_indicates_offline,
+                        version_indicates_offline,
+                        len(api_errors) > 0,
+                    ]
+
+                    # Wskaźniki pozytywne - sugerują, że serwer jest online
+                    positive_indicators = [
+                        reported_online,
+                        api_player_count > 0,
+                        recent_player_activity,
+                        recent_server_activity
+                    ]
+
+                    # Liczba wskaźników
+                    negative_count = sum(1 for ind in negative_indicators if ind)
+                    positive_count = sum(1 for ind in positive_indicators if ind)
+
+                    # Logika decyzyjna - bazuje na przewadze wskaźników
+                    if positive_count > negative_count:
+                        # Przewaga wskaźników pozytywnych - serwer jest online
+                        actual_online = True
+                        logger.debug("ServerCheck",
+                                     f"Wymuszam status ONLINE na podstawie analizy wskaźników (pozytywne: {positive_count}, negatywne: {negative_count})",
+                                     log_type="API",
+                                     positive=positive_indicators,
+                                     negative=negative_indicators)
+                    elif negative_count > positive_count:
+                        # Przewaga wskaźników negatywnych - serwer jest offline
+                        actual_online = False
+                        logger.debug("ServerCheck",
+                                     f"Wymuszam status OFFLINE na podstawie analizy wskaźników (pozytywne: {positive_count}, negatywne: {negative_count})",
+                                     log_type="API",
+                                     positive=positive_indicators,
+                                     negative=negative_indicators)
+                    elif api_player_count > 0:
+                        # Remis, ale API pokazuje graczy - uznajemy za online
+                        actual_online = True
+                        logger.debug("ServerCheck",
+                                     "Remis wskaźników, ale API pokazuje graczy - uznajemy za ONLINE",
+                                     log_type="API")
+                    elif recent_player_activity:
+                        # Remis, brak graczy w API, ale były niedawne aktywności graczy
+                        actual_online = True
+                        logger.debug("ServerCheck",
+                                     "Remis wskaźników, ale były niedawne aktywności graczy - uznajemy za ONLINE",
+                                     log_type="API",
+                                     active_players=active_players)
+
+                    # ===== FAZA 4: Aktualizacja statusu i danych =====
+
+                    # Aktualizacja statusu online w danych
+                    data["online"] = actual_online
+
+                    # Jeśli serwer faktycznie jest online, aktualizuj czas ostatniej aktywności
+                    if actual_online:
                         last_known_online_time = current_time
-                        logger.debug("ServerCheck", "Serwer online z graczami, aktualizacja czasu online",
-                                     log_type="DATA")
 
-                    # Jeśli API raportuje offline, ale widzieliśmy graczy w ostatnich 5 minutach, uznaj serwer za online
-                    elif not reported_online and last_known_online_time:
-                        time_difference = (current_time - last_known_online_time).total_seconds() / 60
+                        # Jeśli API nie zwróciło danych o graczach, ale wiemy o aktywnych graczach, dodaj ich
+                        if "players" not in data:
+                            data["players"] = {}
 
-                        # Jeśli ostatnia aktywność była mniej niż 5 minut temu, nadal uznajemy serwer za online
-                        if time_difference < 5:
-                            # Sprawdź, czy mamy aktywnych graczy w ciągu ostatnich 5 minut
-                            recent_players = False
-                            for player, last_time in last_seen.items():
-                                player_time_diff = (current_time - last_time).total_seconds() / 60
-                                if player_time_diff < 5:
-                                    recent_players = True
-                                    break
-
-                            if recent_players:
-                                logger.debug("ServerCheck",
-                                             f"API zgłasza offline, ale widzieliśmy graczy w ciągu ostatnich 5 minut. Wymuszam status online.",
-                                             log_type="API",
-                                             last_online_time=format_time(last_known_online_time),
-                                             time_diff=time_difference)
-                                data["online"] = True
-
-                                # Odtwarzamy dane o graczach z ostatniego znanego stanu
-                                if "players" not in data:
-                                    data["players"] = {}
-
-                                active_players = []
-                                for player, last_time in last_seen.items():
-                                    player_time_diff = (current_time - last_time).total_seconds() / 60
-                                    if player_time_diff < 5:
-                                        active_players.append(player)
-
-                                if active_players:
-                                    data["players"]["online"] = len(active_players)
-                                    data["players"]["list"] = active_players
+                        if ("list" not in data["players"] or not data["players"]["list"]) and active_players:
+                            data["players"]["list"] = active_players
+                            data["players"]["online"] = len(active_players)
+                            data["players"]["max"] = max_players
+                            logger.debug("ServerCheck",
+                                         f"Dodano {len(active_players)} aktywnych graczy na podstawie historii",
+                                         log_type="DATA",
+                                         players=active_players)
 
                     # Logowanie szczegółowych informacji o serwerze
-                    if data.get("online", False):
+                    if actual_online:
                         logger.server_status(True, data)
                     else:
                         logger.server_status(False, data)
 
                     return data
                 else:
+                    # Obsługa błędów HTTP
                     error_msg = f"Błąd API: {response.status}"
-                    # Dla kodu 429 dodaj bardziej przyjazną wiadomość
                     if response.status == 429:
                         error_msg = "Zbyt wiele zapytań do API (kod 429). Proszę spróbować ponownie za chwilę."
+                    elif response.status == 404:
+                        error_msg = "Serwer nie został znaleziony przez API (kod 404). Sprawdź adres i port."
+                    elif response.status >= 500:
+                        error_msg = f"Błąd serwera API (kod {response.status}). Spróbuj ponownie później."
 
                     logger.api_request(api_url, status=response.status, error=error_msg)
-                    return {"online": False, "error": error_msg}
+
+                    # Próba inteligentnego ustalenia statusu mimo błędu API
+                    if last_known_online_time:
+                        server_time_diff = (current_time - last_known_online_time).total_seconds() / 60
+                        if server_time_diff < 5:
+                            # Znajdź aktywnych graczy (tych widzianych w ciągu ostatnich 5 minut)
+                            active_players = []
+                            for player, player_time in last_seen.items():
+                                if (current_time - player_time).total_seconds() / 60 < 5:
+                                    active_players.append(player)
+
+                            # Serwer był niedawno online, uznajemy, że nadal działa
+                            logger.debug("ServerCheck",
+                                         "Błąd API, ale serwer był niedawno online - zwracamy status ONLINE",
+                                         log_type="API")
+                            return {
+                                "online": True,
+                                "api_error": error_msg,
+                                "players": {
+                                    "online": len(active_players),
+                                    "max": max_players,
+                                    "list": active_players
+                                },
+                                "hostname": MC_SERVER_ADDRESS
+                            }
+
     except Exception as e:
+        # Obsługa innych wyjątków
         error_msg = f"Wyjątek: {str(e)}"
         logger.api_request(api_url, error=error_msg)
+
+        # Próba zwrócenia sensownych danych mimo wyjątku
+        if last_known_online_time:
+            server_time_diff = (current_time - last_known_online_time).total_seconds() / 60
+            if server_time_diff < 5:
+                # Używamy ostatnich znanych danych
+                active_players = [player for player, player_time in last_seen.items()
+                                  if (current_time - player_time).total_seconds() / 60 < 5]
+
+                return {
+                    "online": True,
+                    "exception": error_msg,
+                    "players": {
+                        "online": len(active_players),
+                        "max": max_players,
+                        "list": active_players
+                    },
+                    "hostname": MC_SERVER_ADDRESS
+                }
+
         return {"online": False, "error": error_msg}
 
 
@@ -380,8 +512,8 @@ def create_minecraft_embed(server_data, last_seen_data):
                 embed.add_field(name="Ostatnio widziani:", value=f"```{last_seen_text}```", inline=False)
                 logger.debug("Embed", "Dodano listę ostatnio widzianych graczy", offline_players=offline_players)
 
-        # Dodawanie wersji bota do stopki embeda
-        embed.set_footer(text=f"v{BOT_VERSION}")
+        # Dodaj informację o wersji bota
+        embed.set_footer(text=f"Bot v{BOT_VERSION}")
 
         return embed
 
@@ -475,6 +607,9 @@ def create_minecraft_embed(server_data, last_seen_data):
         if last_seen_text:
             embed.add_field(name="Ostatnio widziani:", value=f"```{last_seen_text}```", inline=False)
             logger.debug("Embed", "Dodano listę ostatnio widzianych graczy", offline_players=offline_players)
+
+    # Dodaj informację o wersji bota
+    embed.set_footer(text=f"Bot v{BOT_VERSION}")
 
     return embed
 
