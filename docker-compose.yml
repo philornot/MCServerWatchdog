@@ -1,0 +1,12 @@
+version: '3'
+
+services:
+  mcserverwatch:
+    build: .
+    container_name: mcserverwatch
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    env_file:
+      - .env

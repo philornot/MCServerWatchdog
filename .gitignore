@@ -1,5 +1,8 @@
 *.env
 .idea
 .venv
-logs
-data
+logs/
+data/
+__pycache__/
+*.pyc
+# NIE dodawaj tu version.txt

@@ -122,6 +122,26 @@ def load_bot_data():
         logger.error("DataStorage", f"Błąd podczas ładowania danych: {e}", log_type="CONFIG")
 
 
+def get_bot_version():
+    """
+    Odczytuje wersję bota z pliku version.txt lub zwraca wersję developerską.
+
+    Returns:
+        str: Wersja bota
+    """
+    try:
+        if os.path.exists("version.txt"):
+            with open("version.txt", "r") as f:
+                return f.read().strip()
+        return "dev-local"
+    except Exception as e:
+        logger.warning("Version", f"Nie udało się odczytać wersji: {e}", log_type="CONFIG")
+        return "unknown"
+
+
+# Dodaj zmienną globalną przechowującą wersję
+BOT_VERSION = get_bot_version()
+
 def get_warsaw_time():
     """
     Zwraca aktualny czas w strefie czasowej Warszawy.
@@ -359,6 +379,9 @@ def create_minecraft_embed(server_data, last_seen_data):
             if last_seen_text:
                 embed.add_field(name="Ostatnio widziani:", value=f"```{last_seen_text}```", inline=False)
                 logger.debug("Embed", "Dodano listę ostatnio widzianych graczy", offline_players=offline_players)
+
+        # Dodawanie wersji bota do stopki embeda
+        embed.set_footer(text=f"v{BOT_VERSION}")
 
         return embed
 
