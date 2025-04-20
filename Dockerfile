@@ -2,18 +2,18 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-# Kopiuj wersję wygenerowaną przez GitHub Actions
+# Kopiowanie wersji wygenerowanej przez GitHub Actions
 COPY version.txt /app/version.txt
 
-# Kopiuj pliki konfiguracyjne i zależności
+# Kopiowanie plików konfiguracyjnych i zależności
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip pip install --no-cache-dir -r requirements.txt
 
-# Kopiuj resztę kodu
+# Kopiowanie reszty kodu
 COPY . .
 
-# Utwórz katalogi na dane i logi
+# Tworzenie katalogów na dane i logi
 RUN mkdir -p logs data
 
-# Uruchom bota
+# Uruchomienie aplikacji
 CMD ["python", "main.py"]
