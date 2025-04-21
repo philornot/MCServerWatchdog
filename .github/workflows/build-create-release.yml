@@ -133,6 +133,11 @@ jobs:
           # Sprawdź, czy istnieje plik version.txt i pobierz aktualną wersję
           if [ -f "version.txt" ]; then
             VERSION=$(cat version.txt | tr -d '[:space:]')
+            # Dodatkowa walidacja formatu
+            if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\+[a-zA-Z0-9]+)?$ ]]; then
+              echo "::warning::Nieważny format wersji w version.txt: '$VERSION', resetuję do 1.0.0"
+              VERSION="1.0.0"
+            fi
             echo "Aktualna wersja: $VERSION"
 
             # Inkrementuj wersję bazową tylko jeśli plik istnieje
@@ -166,7 +171,7 @@ jobs:
           echo "clean_version=$NEW_VERSION" >> $GITHUB_OUTPUT
           echo "Wygenerowana wersja: $NEW_VERSION"
 
-      # Krok 7: Commitowanie zmian w pliku version.txt
+      # Krok 7: Commitowanie zmian w pliku version.txt (z obsługą konfliktów)
       - name: Commit version file
         id: commit
         run: |
@@ -188,9 +193,34 @@ jobs:
             # Utwórz commit
             git commit -m "Aktualizacja version.txt do wersji ${{ steps.version.outputs.clean_version }}"
           
-            # Wypchnij zmiany do repozytorium
-            echo "Wypychanie zmian do gałęzi $BRANCH_NAME..."
-            git push origin HEAD:${BRANCH_NAME}
+            # Próba push z obsługą konfliktów
+            echo "Próba push zmian do gałęzi $BRANCH_NAME..."
+            
+            # Najpierw pobierz najnowsze zmiany z remote, zachowując lokalny commit
+            git fetch origin $BRANCH_NAME
+            
+            # Opcja 1: Próba rebase (preferowana, zachowuje historię liniową)
+            if git rebase origin/$BRANCH_NAME; then
+              echo "Rebase zakończony pomyślnie, wykonuję push..."
+              git push origin HEAD:${BRANCH_NAME}
+            else
+              # Opcja 2: Anuluj rebase i spróbuj merge
+              git rebase --abort
+              echo "Rebase nie powiódł się, próbuję merge..."
+              
+              if git pull --no-rebase origin $BRANCH_NAME && git push origin HEAD:${BRANCH_NAME}; then
+                echo "Merge i push zakończone pomyślnie"
+              else
+                # Opcja 3: W skrajnym przypadku, gdy wszystko inne zawiedzie, użyj force push
+                echo "UWAGA: Standardowy push nie powiódł się, używam force push jako ostatniej opcji"
+                if git push --force origin HEAD:${BRANCH_NAME}; then
+                  echo "Force push zakończony pomyślnie"
+                else
+                  echo "Force push również się nie powiódł. Anulowanie."
+                  exit 1
+                fi
+              fi
+            fi
           
             echo "Zaktualizowano plik version.txt w repozytorium"
             echo "committed=true" >> $GITHUB_OUTPUT
