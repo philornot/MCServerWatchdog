@@ -1,9 +1,9 @@
 import datetime
 import os
-from colorama import init, Fore, Back, Style
 import json
 import logging
 import pytz
+from colorama import init, Fore, Back, Style
 
 # Inicjalizacja colorama
 init(autoreset=True)
@@ -11,11 +11,13 @@ init(autoreset=True)
 
 class PrettyLogger:
     """
-    Piękny logger z kolorowym formatowaniem i wieloma funkcjami ułatwiającymi debugowanie.
+    Piękny logger z kolorowym formatowaniem i inteligentnym filtrowaniem debugowania.
     """
 
     # Poziomy logowania
     LEVELS = {
+        "TRACE": {"color": Fore.MAGENTA, "symbol": "🔬", "level": 5},
+        # Nowy poziom TRACE dla najdrobniejszych szczegółów
         "DEBUG": {"color": Fore.CYAN, "symbol": "🔍", "level": logging.DEBUG},
         "INFO": {"color": Fore.GREEN, "symbol": "ℹ️", "level": logging.INFO},
         "WARNING": {"color": Fore.YELLOW, "symbol": "⚠️", "level": logging.WARNING},
@@ -33,7 +35,11 @@ class PrettyLogger:
         "API": {"color": Fore.CYAN, "symbol": "🌐"},
     }
 
-    def __init__(self, log_file=None, console_level="DEBUG", file_level="INFO", timezone="Europe/Warsaw"):
+    # Dodajemy poziom TRACE do biblioteki logging
+    logging.addLevelName(5, "TRACE")
+
+    def __init__(self, log_file=None, console_level="INFO", file_level="DEBUG", timezone="Europe/Warsaw",
+                 max_json_length=500, trim_lists=True, verbose_api=False):
         """
         Inicjalizacja loggera.
 
@@ -41,15 +47,21 @@ class PrettyLogger:
         :param console_level: Poziom logowania dla konsoli.
         :param file_level: Poziom logowania dla pliku.
         :param timezone: Strefa czasowa do formatowania czasu.
+        :param max_json_length: Maksymalna długość logowanych JSONów przed ich przycięciem
+        :param trim_lists: Czy przycinać długie listy w logach
+        :param verbose_api: Czy logować pełne odpowiedzi API (True) czy tylko najważniejsze pola (False)
         """
         self.timezone = pytz.timezone(timezone)
         self.console_level = console_level
         self.file_level = file_level
         self.log_file = log_file
+        self.max_json_length = max_json_length
+        self.trim_lists = trim_lists
+        self.verbose_api = verbose_api
 
         # Konfiguracja loggera
         self.logger = logging.getLogger("MCServerWatchDog")
-        self.logger.setLevel(logging.DEBUG)
+        self.logger.setLevel(5)  # Najniższy poziom (TRACE)
         self.logger.handlers = []  # Usuń wszystkie handlery
 
         # Dodaj handler konsoli
@@ -86,30 +98,152 @@ class PrettyLogger:
 
         return formatted
 
+    def _smart_trim(self, data, max_depth=2, current_depth=0):
+        """
+        Inteligentnie przycina złożone struktury danych, zachowując czytelność.
+
+        :param data: Dane do przycinania
+        :param max_depth: Maksymalna głębokość zagnieżdżenia
+        :param current_depth: Aktualna głębokość zagnieżdżenia
+        :return: Przycięta kopia danych
+        """
+        if current_depth >= max_depth:
+            if isinstance(data, dict) and len(data) > 3:
+                return {k: "..." for k, v in list(data.items())[:3]}
+            elif isinstance(data, list) and len(data) > 3:
+                return data[:3] + ["... (i {} więcej elementów)".format(len(data) - 3)]
+            else:
+                return data
+
+        if isinstance(data, dict):
+            return {k: self._smart_trim(v, max_depth, current_depth + 1) for k, v in data.items()}
+        elif isinstance(data, list) and self.trim_lists and len(data) > 5:
+            return [self._smart_trim(x, max_depth, current_depth + 1) for x in data[:5]] + \
+                ["... (i {} więcej elementów)".format(len(data) - 5)]
+        elif isinstance(data, list):
+            return [self._smart_trim(x, max_depth, current_depth + 1) for x in data]
+        else:
+            return data
+
+    def _format_api_response(self, data):
+        """
+        Inteligentnie przetwarza odpowiedź API, pozostawiając tylko najważniejsze informacje.
+
+        :param data: Pełna odpowiedź API
+        :return: Przefiltrowana i uproszczona odpowiedź
+        """
+        if not self.verbose_api:
+            # Jeśli nie chcemy pełnych odpowiedzi, wyciągamy kluczowe informacje
+            important_data = {}
+
+            # Zapisujemy najważniejsze pola
+            for key in ["online", "version", "hostname"]:
+                if key in data:
+                    important_data[key] = data[key]
+
+            # Dane o graczach
+            if "players" in data:
+                important_data["players"] = {
+                    "online": data["players"].get("online", 0),
+                    "max": data["players"].get("max", 0)
+                }
+                if "list" in data["players"] and data["players"]["list"]:
+                    important_data["players"]["list"] = data["players"]["list"]
+
+            # MOTD jest ważne dla wykrywania stanu
+            if "motd" in data and "clean" in data["motd"]:
+                important_data["motd"] = {"clean": data["motd"]["clean"]}
+
+            # Błędy zawsze zachowujemy
+            if "error" in data:
+                important_data["error"] = data["error"]
+
+            if "debug" in data and "error" in data["debug"]:
+                important_data["debug"] = {"error": data["debug"]["error"]}
+
+            return important_data
+        else:
+            # Jeśli chcemy pełne odpowiedzi, inteligentnie przycinamy
+            return self._smart_trim(data)
+
+    def _log_json(self, data, max_length=None):
+        """
+        Inteligentne logowanie danych JSON z ograniczeniem długości.
+
+        :param data: Dane do zalogowania
+        :param max_length: Maksymalna długość wyjściowego tekstu
+        :return: Sformatowany tekst JSON
+        """
+        if max_length is None:
+            max_length = self.max_json_length
+
+        try:
+            json_text = json.dumps(data, indent=2, ensure_ascii=False)
+
+            if len(json_text) > max_length:
+                # Jeśli tekst jest za długi, pokazujemy początek i koniec
+                half_length = max_length // 2 - 10
+                return json_text[:half_length] + "\n...\n[skrócono " + str(
+                    len(json_text) - max_length) + " znaków]\n..." + json_text[-half_length:]
+            return json_text
+        except Exception as e:
+            return f"<błąd formatowania JSON: {e}>"
+
     def _log(self, level, module, message, log_type=None, **kwargs):
         """Zapisuje log z określonym poziomem."""
         formatted = self._format_message(level, module, message, log_type)
 
         # Zapisz do loggera z odpowiednim poziomem
-        getattr(self.logger, level.lower())(formatted)
+        if level == "TRACE":
+            self.logger.log(5, formatted)  # Użyj zdefiniowanego poziomu TRACE
+        else:
+            getattr(self.logger, level.lower())(formatted)
 
         # Jeśli są dodatkowe dane, wypisz je ładnie
         if kwargs:
-            self._log_data(level, **kwargs)
+            filtered_kwargs = {}
 
-    def _log_data(self, level, **kwargs):
+            # Przetwarzanie specjalnych pól
+            for key, value in kwargs.items():
+                if key == "response" and not self.verbose_api:
+                    # Dla odpowiedzi API stosujemy specjalne przetwarzanie
+                    filtered_kwargs[key] = self._format_api_response(value)
+                elif isinstance(value, (dict, list)):
+                    # Dla złożonych struktur stosujemy inteligentne przycinanie
+                    filtered_kwargs[key] = self._smart_trim(value)
+                else:
+                    # Wartości proste pozostawiamy bez zmian
+                    filtered_kwargs[key] = value
+
+            # Logujemy przetworzone dane
+            if level == "TRACE":
+                self._log_data(level, 5, **filtered_kwargs)
+            else:
+                self._log_data(level, **filtered_kwargs)
+
+    def _log_data(self, level, log_level=None, **kwargs):
         """Loguje dodatkowe dane jako JSON."""
         for key, value in kwargs.items():
             if value is not None:
                 try:
                     # Jeśli to słownik lub lista, wydrukuj jako JSON
                     if isinstance(value, (dict, list)):
-                        formatted_json = json.dumps(value, indent=2, ensure_ascii=False)
-                        self.logger.debug(f"{Fore.CYAN}[DATA] {key}:\n{formatted_json}")
+                        formatted_json = self._log_json(value)
+                        if log_level:
+                            self.logger.log(log_level, f"{Fore.CYAN}[DATA] {key}:\n{formatted_json}")
+                        else:
+                            self.logger.debug(f"{Fore.CYAN}[DATA] {key}:\n{formatted_json}")
                     else:
-                        self.logger.debug(f"{Fore.CYAN}[DATA] {key}: {value}")
+                        if log_level:
+                            self.logger.log(log_level, f"{Fore.CYAN}[DATA] {key}: {value}")
+                        else:
+                            self.logger.debug(f"{Fore.CYAN}[DATA] {key}: {value}")
                 except Exception as e:
                     self.logger.error(f"Błąd podczas logowania danych: {e}")
+
+    def trace(self, module, message, log_type=None, **kwargs):
+        """Log najdrobniejszych szczegółów (poziom TRACE)."""
+        self._log("TRACE", module, message, log_type, **kwargs)
 
     def debug(self, module, message, log_type=None, **kwargs):
         """Log debugowania."""
@@ -140,14 +274,31 @@ class PrettyLogger:
             max_players = players.get("max", 0)
             player_list = players.get("list", [])
 
+            # Używamy INFO zamiast DEBUG dla ważnych informacji
             self.info(
                 "ServerStatus",
                 f"Serwer {status_str} - Gracze: {player_count}/{max_players}",
                 log_type="SERVER",
-                players=player_list,
-                version=server_data.get("version", "Unknown"),
-                server_data=server_data
+                players=player_list
             )
+
+            # Szczegóły serwera logujemy na poziomie DEBUG lub TRACE
+            if self.verbose_api:
+                self.debug(
+                    "ServerDetails",
+                    f"Szczegółowe informacje o serwerze",
+                    log_type="SERVER",
+                    version=server_data.get("version", "Unknown"),
+                    server_data=server_data
+                )
+            else:
+                self.trace(
+                    "ServerDetails",
+                    f"Szczegółowe informacje o serwerze",
+                    log_type="SERVER",
+                    version=server_data.get("version", "Unknown"),
+                    server_data=server_data
+                )
         else:
             status_str = f"{Fore.RED}OFFLINE"
             self.warning(
@@ -184,7 +335,10 @@ class PrettyLogger:
         if error:
             self.error("API", f"Błąd podczas żądania do {url}: {error}", log_type="API")
         else:
-            self.debug("API", f"Żądanie do {url} zakończone kodem {status}", log_type="API", response=response)
+            # Pełną odpowiedź API logujemy na poziomie TRACE, a na DEBUG tylko podstawowe informacje
+            self.debug("API", f"Żądanie do {url} zakończone kodem {status}", log_type="API")
+            if response:
+                self.trace("API", f"Szczegóły odpowiedzi API", log_type="API", response=response)
 
     def player_activity(self, player, status, last_seen=None):
         """Log aktywności gracza."""

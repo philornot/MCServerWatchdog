@@ -25,7 +25,14 @@ DATA_FILE = os.getenv("DATA_FILE", "data/bot_data.pickle")  # Plik do zapisywani
 GUILD_ID = os.getenv("GUILD_ID")  # ID serwera Discord, opcjonalnie dla szybszego rozwoju komend
 
 # Inicjalizacja loggera
-logger = PrettyLogger(log_file=LOG_FILE, console_level="INFO", file_level="DEBUG")
+logger = PrettyLogger(
+    log_file=LOG_FILE,
+    console_level="INFO",
+    file_level="DEBUG",
+    max_json_length=300,   # Maksymalna długość JSONów w logach
+    trim_lists=True,       # Przycinaj długie listy
+    verbose_api=False      # Nie loguj pełnych odpowiedzi API
+)
 
 # Słownik do przechowywania informacji o ostatniej aktywności graczy
 last_seen = {}
