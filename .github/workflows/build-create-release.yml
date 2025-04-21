@@ -115,7 +115,7 @@ jobs:
           # Inkrementuj wersję
           VERSION=$(increment_version "$CURRENT_VERSION" "$RELEASE_TYPE")
           
-          # Jeśli to automatyczny push, dodaj datę i hash commita
+          # Jeśli to automatyczny push do main, dodaj datę i hash commita
           if [ "$RELEASE_TYPE" == "" ] || [ "${{ github.event_name }}" == "push" ]; then
             COMMIT_HASH=$(git rev-parse --short HEAD)
             BUILD_DATE=$(date +'%Y%m%d')
@@ -139,27 +139,118 @@ jobs:
           
           if [ -z "$LAST_TAG" ]; then
             # Jeśli nie ma tagów, weź wszystkie commity
-            CHANGELOG=$(git log --pretty=format:"- %s (%h)" --reverse)
+            COMMIT_LIST=$(git log --pretty=format:"%h||%an||%s" --reverse | tail -n 20)
           else
             # Jeśli są tagi, weź commity od ostatniego taga
-            CHANGELOG=$(git log ${LAST_TAG}..HEAD --pretty=format:"- %s (%h)" --reverse)
+            COMMIT_LIST=$(git log ${LAST_TAG}..HEAD --pretty=format:"%h||%an||%s" --reverse)
+          fi
+          
+          # Przygotuj mapę kategorii zmian
+          declare -A CATEGORIES
+          CATEGORIES=(
+            ["fix"]="🐛 Poprawki błędów"
+            ["feat"]="✨ Nowe funkcje"
+            ["docs"]="📚 Dokumentacja"
+            ["style"]="💎 Formatowanie kodu"
+            ["refactor"]="♻️ Refaktoryzacja"
+            ["perf"]="🚀 Optymalizacja"
+            ["test"]="🧪 Testy"
+            ["build"]="🔧 Build"
+            ["ci"]="🤖 CI/CD"
+            ["chore"]="🧹 Porządki"
+          )
+          
+          # Funkcja sprawdzająca typ commita
+          get_commit_type() {
+            local commit_msg="$1"
+            
+            for type in "${!CATEGORIES[@]}"; do
+              if [[ "$commit_msg" == "$type"* || "$commit_msg" == *"[$type]"* || "$commit_msg" == *"($type)"* ]]; then
+                echo "$type"
+                return
+              fi
+            done
+            
+            # Domyślnie, jeśli nie rozpoznano typu
+            echo "other"
+          }
+          
+          # Inicjalizacja zmiennych dla kategorii
+          for category in "${CATEGORIES[@]}"; do
+            eval "${category//:/_}_COMMITS=''"
+          done
+          OTHER_COMMITS=""
+          
+          # Przetwarzanie commitów i grupowanie ich
+          while IFS= read -r line; do
+            IFS='||' read -r hash author message <<< "$line"
+            commit_type=$(get_commit_type "$message")
+            
+            # Usuń prefix typu z treści commita
+            clean_message=$(echo "$message" | sed -E 's/^(feat|fix|docs|style|refactor|perf|test|build|ci|chore)(\([^)]+\))?:\s*//g')
+            clean_message=$(echo "$clean_message" | sed -E 's/\[(feat|fix|docs|style|refactor|perf|test|build|ci|chore)\]\s*//g')
+            clean_message=$(echo "$clean_message" | sed -E 's/\((feat|fix|docs|style|refactor|perf|test|build|ci|chore)\)\s*//g')
+            
+            # Ładne formatowanie wpisu changelog
+            formatted_entry="* ${clean_message} [${hash}](https://github.com/${{ github.repository }}/commit/${hash})"
+            
+            # Dodaj do odpowiedniej kategorii
+            if [ "$commit_type" != "other" ]; then
+              category_var="${CATEGORIES[$commit_type]//:/_}_COMMITS"
+              eval "$category_var=\"$formatted_entry\n\${$category_var}\""
+            else
+              OTHER_COMMITS="${formatted_entry}\n${OTHER_COMMITS}"
+            fi
+          done <<< "$COMMIT_LIST"
+          
+          # Przygotowanie każdej sekcji
+          FINAL_CHANGELOG=""
+          
+          # Dodaj sekcje tylko jeśli mają zawartość
+          for type in "${!CATEGORIES[@]}"; do
+            category_var="${CATEGORIES[$type]//:/_}_COMMITS"
+            eval "commits=\${$category_var}"
+            
+            if [ -n "$commits" ]; then
+              FINAL_CHANGELOG="${FINAL_CHANGELOG}### ${CATEGORIES[$type]}\n${commits}\n\n"
+            fi
+          done
+          
+          # Dodaj inne zmiany (jeśli są)
+          if [ -n "$OTHER_COMMITS" ]; then
+            FINAL_CHANGELOG="${FINAL_CHANGELOG}### 🔄 Inne zmiany\n${OTHER_COMMITS}\n\n"
+          fi
+          
+          # Jeśli nie ma zmian, dodaj informację
+          if [ -z "$FINAL_CHANGELOG" ]; then
+            FINAL_CHANGELOG="Brak zmian od ostatniego wydania."
           fi
           
           # Zapisz changelog do pliku
-          echo "# Zmiany w wersji ${{ steps.version.outputs.VERSION }}" > changelog.md
+          echo "# 📦 MCServerWatchdog v${{ steps.version.outputs.VERSION }}" > changelog.md
           echo "" >> changelog.md
-          echo "$CHANGELOG" >> changelog.md
+          echo "Data wydania: $(date +'%d.%m.%Y')" >> changelog.md
           echo "" >> changelog.md
-          echo "## Pełne informacje" >> changelog.md
+          echo -e "## 📋 Lista zmian\n" >> changelog.md
+          echo -e "$FINAL_CHANGELOG" >> changelog.md
+          echo "## 📊 Statystyki" >> changelog.md
           echo "- Wersja: ${{ steps.version.outputs.VERSION }}" >> changelog.md
-          echo "- Data wydania: $(date +'%Y-%m-%d %H:%M:%S')" >> changelog.md
+          
+          # Liczba commitów
+          COMMIT_COUNT=$(echo "$COMMIT_LIST" | wc -l)
+          echo "- Liczba commitów: $COMMIT_COUNT" >> changelog.md
+          
+          # Lista autorów
+          AUTHORS=$(echo "$COMMIT_LIST" | cut -d'||' -f2 | sort | uniq | tr '\n' ', ' | sed 's/,$//')
+          echo "- Autorzy: $AUTHORS" >> changelog.md
           
           # Escape tekstu dla GitHub Actions
-          CHANGELOG_ESCAPED="${CHANGELOG//'%'/'%25'}"
-          CHANGELOG_ESCAPED="${CHANGELOG_ESCAPED//$'\n'/'%0A'}"
-          CHANGELOG_ESCAPED="${CHANGELOG_ESCAPED//$'\r'/'%0D'}"
+          FINAL_CHANGELOG_ESCAPED=$(cat changelog.md)
+          FINAL_CHANGELOG_ESCAPED="${FINAL_CHANGELOG_ESCAPED//'%'/'%25'}"
+          FINAL_CHANGELOG_ESCAPED="${FINAL_CHANGELOG_ESCAPED//$'\n'/'%0A'}"
+          FINAL_CHANGELOG_ESCAPED="${FINAL_CHANGELOG_ESCAPED//$'\r'/'%0D'}"
           echo "CHANGELOG<<EOF" >> $GITHUB_OUTPUT
-          echo "$CHANGELOG_ESCAPED" >> $GITHUB_OUTPUT
+          echo "$FINAL_CHANGELOG_ESCAPED" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
       # Budowanie i publikowanie obrazu Docker
@@ -198,22 +289,9 @@ jobs:
         with:
           tag_name: v${{ steps.version.outputs.VERSION }}
           name: Release v${{ steps.version.outputs.VERSION }}
-          body: |
-            ## MCServerWatchdog v${{ steps.version.outputs.VERSION }}
-            
-            ${{ steps.changelog.outputs.CHANGELOG }}
-            
-            ### Docker Image
-            ```
-            ghcr.io/${{ github.repository_owner }}/mcserverwatchdog:${{ steps.version.outputs.VERSION }}
-            ```
-            
-            Pobierz i uruchom najnowszą wersję za pomocą Docker:
-            ```bash
-            docker pull ghcr.io/${{ github.repository_owner }}/mcserverwatchdog:${{ steps.version.outputs.VERSION }}
-            ```
+          body: "${{ steps.changelog.outputs.CHANGELOG }}"
           draft: false
           prerelease: false
-          generate_release_notes: true
+          generate_release_notes: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
