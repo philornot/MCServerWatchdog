@@ -203,6 +203,8 @@ jobs:
       - name: Generate changelog
         id: changelog
         run: |
+          set -x  # Włącz tryb debug, aby zobaczyć wykonywane polecenia
+          
           # Użyj odpowiedniego punktu odniesienia do wyszukiwania commitów
           if [[ "${{ steps.commit.outputs.committed }}" == "true" ]]; then
             echo "Poprzedni commit zawierał aktualizację version.txt, uwzględniam w changelog"
@@ -224,6 +226,12 @@ jobs:
             echo "Znaleziono tag $LAST_TAG, pobieram commity od tego tagu"
             # Jeśli są tagi, weź commity od ostatniego taga
             COMMIT_LIST=$(git log ${LAST_TAG}..${GIT_REF_BASE} --pretty=format:"%h||%an||%s" --reverse)
+          fi
+          
+          # Sprawdź czy mamy jakiekolwiek commity do przetworzenia
+          if [ -z "$COMMIT_LIST" ]; then
+            echo "UWAGA: Nie znaleziono żadnych commitów do przetworzenia"
+            COMMIT_LIST="dummy||bot||dummy commit, aby zapewnić poprawne działanie skryptu"
           fi
           
           # Przygotuj mapę kategorii zmian
@@ -278,59 +286,52 @@ jobs:
           done
           other_commits=""
           
-          # Sprawdź, czy lista commitów jest pusta
-          if [ -z "$COMMIT_LIST" ]; then
-            echo "Nie znaleziono żadnych commitów od ostatniego tagu"
-          else 
-            echo "Znaleziono commity, przetwarzam..."
+          # Przetwarzanie commitów i grupowanie ich
+          while IFS= read -r line; do
+            if [ -z "$line" ]; then
+              continue
+            fi
           
-            # Przetwarzanie commitów i grupowanie ich
-            while IFS= read -r line; do
-              if [ -z "$line" ]; then
-                continue
-              fi
+            # Parsuj linię na hash, autora i wiadomość
+            IFS='||' read -r hash author message <<< "$line"
           
-              # Parsuj linię na hash, autora i wiadomość
-              IFS='||' read -r hash author message <<< "$line"
+            if [ -z "$hash" ] || [ -z "$message" ]; then
+              echo "Pominięto niewłaściwy format commita: $line"
+              continue
+            fi
           
-              if [ -z "$hash" ] || [ -z "$message" ]; then
-                echo "Pominięto niewłaściwy format commita: $line"
-                continue
-              fi
+            # Określ typ commita
+            commit_type=$(get_commit_type "$message")
           
-              # Określ typ commita
-              commit_type=$(get_commit_type "$message")
+            # Usuń prefix typu z treści commita
+            clean_message=$(echo "$message" | sed -E 's/^(feat|fix|docs|style|refactor|perf|test|build|ci|chore)(\([^)]+\))?:\s*//g' | sed -E 's/\[(feat|fix|docs|style|refactor|perf|test|build|ci|chore)\]\s*//g' | sed -E 's/\((feat|fix|docs|style|refactor|perf|test|build|ci|chore)\)\s*//g')
           
-              # Usuń prefix typu z treści commita
-              clean_message=$(echo "$message" | sed -E 's/^(feat|fix|docs|style|refactor|perf|test|build|ci|chore)(\([^)]+\))?:\s*//g' | sed -E 's/\[(feat|fix|docs|style|refactor|perf|test|build|ci|chore)\]\s*//g' | sed -E 's/\((feat|fix|docs|style|refactor|perf|test|build|ci|chore)\)\s*//g')
+            # Zabezpiecz tekst przed specjalnymi znakami
+            clean_message=$(echo "$clean_message" | sed 's/"/\\"/g')
           
-              # Zabezpiecz tekst przed specjalnymi znakami
-              clean_message=$(echo "$clean_message" | sed 's/"/\\"/g')
+            # Ładne formatowanie wpisu changelog z linkiem do commita
+            formatted_entry="* ${clean_message} [${hash}](https://github.com/${{ github.repository }}/commit/${hash})"
           
-              # Ładne formatowanie wpisu changelog z linkiem do commita
-              formatted_entry="* ${clean_message} [${hash}](https://github.com/${{ github.repository }}/commit/${hash})"
-          
-              # Dodaj do odpowiedniej kategorii
-              if [ "$commit_type" != "other" ]; then
-                # Używamy zmiennej z bezpieczną nazwą
-                eval "${commit_type}_commits=\"\${${commit_type}_commits}\n${formatted_entry}\""
-              else
-                other_commits="${other_commits}\n${formatted_entry}"
-              fi
-            done <<< "$COMMIT_LIST"
-          fi
+            # Dodaj do odpowiedniej kategorii
+            if [ "$commit_type" != "other" ]; then
+              # Używamy eval aby przypisać wartość do zmiennej o nazwie z ${commit_type}_commits
+              eval "${commit_type}_commits=\"\${${commit_type}_commits}\n${formatted_entry}\""
+            else
+              other_commits="${other_commits}\n${formatted_entry}"
+            fi
+          done <<< "$COMMIT_LIST"
           
           # Przygotowanie każdej sekcji
           FINAL_CHANGELOG=""
           
-          # Dodaj sekcje tylko jeśli mają rzeczywistą zawartość (nie puste stringi)
+          # Dodaj sekcje tylko jeśli mają rzeczywistą zawartość
           for type in "${!CATEGORIES[@]}"; do
-            # Pobierz zawartość z bezpiecznej zmiennej
+            # Pobierz zawartość z dynamicznej zmiennej
             content_var="${type}_commits"
             commits=$(eval "echo \"\${$content_var}\"")
             
-            # Usuń puste linie i sprawdź, czy zostało coś poza cudzysłowami ''
-            cleaned_commits=$(echo "$commits" | grep -v "^$" | grep -v "^''$")
+            # Wyczyść puste linie i sprawdź, czy sekcja ma zawartość
+            cleaned_commits=$(echo "$commits" | grep -v "^$" | grep -v "^''$" || echo "")
             
             if [ -n "$cleaned_commits" ]; then
               emoji="${CATEGORY_EMOJIS[$type]}"
@@ -340,9 +341,10 @@ jobs:
           done
           
           # Dodaj inne zmiany (jeśli są)
-          if [ -n "$other_commits" ]; then
+          cleaned_other_commits=$(echo "$other_commits" | grep -v "^$" | grep -v "^''$" || echo "")
+          if [ -n "$cleaned_other_commits" ]; then
             emoji="${CATEGORY_EMOJIS[other]}"
-            FINAL_CHANGELOG="${FINAL_CHANGELOG}### ${emoji} Inne zmiany${other_commits}\n\n"
+            FINAL_CHANGELOG="${FINAL_CHANGELOG}### ${emoji} Inne zmiany${cleaned_other_commits}\n\n"
           fi
           
           # Jeśli nie ma zmian, dodaj informację
@@ -361,13 +363,13 @@ jobs:
           echo "- Wersja: ${{ steps.version.outputs.clean_version }}" >> changelog.md
           
           # Liczba commitów
-          if [ -n "$COMMIT_LIST" ]; then
+          if [ -n "$COMMIT_LIST" ] && [ "$COMMIT_LIST" != "dummy||bot||dummy commit, aby zapewnić poprawne działanie skryptu" ]; then
             COMMIT_COUNT=$(echo "$COMMIT_LIST" | wc -l)
             echo "- Liczba commitów: $COMMIT_COUNT" >> changelog.md
           
             # Lista autorów
             AUTHORS=$(echo "$COMMIT_LIST" | cut -d'||' -f2 | sort | uniq | tr '\n' ', ' | sed 's/,\s*$//')
-            if [ -n "$AUTHORS" ] && [ "$AUTHORS" != "Nieznani" ] && [ "$AUTHORS" != "GitHub Action" ] && [ "$AUTHORS" != "GitHub Actions" ]; then
+            if [ -n "$AUTHORS" ] && [ "$AUTHORS" != "Nieznani" ] && [ "$AUTHORS" != "GitHub Action" ] && [ "$AUTHORS" != "GitHub Actions" ] && [ "$AUTHORS" != "bot" ]; then
               echo "- Autorzy: $AUTHORS" >> changelog.md
             else
               # Spróbuj pobrać dane autora z git config lub użyj właściciela repozytorium
@@ -377,13 +379,14 @@ jobs:
             fi
           else
             echo "- Liczba commitów: 0" >> changelog.md
-            echo "- Autorzy: Brak nowych commitów" >> changelog.md
+            echo "- Autorzy: ${{ github.repository_owner }}" >> changelog.md
           fi
           
           # Zapisz changelog jako output
-          echo 'CHANGELOG<<EOF' >> $GITHUB_OUTPUT
+          # Użyj bezpieczniejszego podejścia do zapisywania multi-line output
+          echo "CHANGELOG<<CHANGELOGEOF" >> $GITHUB_OUTPUT
           cat changelog.md >> $GITHUB_OUTPUT
-          echo 'EOF' >> $GITHUB_OUTPUT
+          echo "CHANGELOGEOF" >> $GITHUB_OUTPUT
 
       # Krok 9: Przygotowanie tagów Docker (zastąpienie + na -)
       - name: Prepare Docker tags
