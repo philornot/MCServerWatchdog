@@ -1,7 +1,8 @@
 import datetime
-import os
 import json
 import logging
+import os
+
 import pytz
 from colorama import init, Fore, Back, Style
 
@@ -11,13 +12,12 @@ init(autoreset=True)
 
 class PrettyLogger:
     """
-    Piękny logger z kolorowym formatowaniem i inteligentnym filtrowaniem debugowania.
+    Piękny logger z kolorowym formatowaniem konsoli i czystymi plikami logów.
     """
 
     # Poziomy logowania
     LEVELS = {
         "TRACE": {"color": Fore.MAGENTA, "symbol": "🔬", "level": 5},
-        # Nowy poziom TRACE dla najdrobniejszych szczegółów
         "DEBUG": {"color": Fore.CYAN, "symbol": "🔍", "level": logging.DEBUG},
         "INFO": {"color": Fore.GREEN, "symbol": "ℹ️", "level": logging.INFO},
         "WARNING": {"color": Fore.YELLOW, "symbol": "⚠️", "level": logging.WARNING},
@@ -37,6 +37,23 @@ class PrettyLogger:
 
     # Dodajemy poziom TRACE do biblioteki logging
     logging.addLevelName(5, "TRACE")
+
+    class ColoredFormatter(logging.Formatter):
+        """Formatter dodający kolory dla konsoli."""
+
+        def format(self, record):
+            return record.msg
+
+    class PlainFormatter(logging.Formatter):
+        """Formatter bez kolorów dla pliku."""
+
+        def format(self, record):
+            if hasattr(record, 'plain_msg'):
+                return record.plain_msg
+            # Usuwamy sekwencje ANSI z wiadomości
+            import re
+            ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+            return ansi_escape.sub('', record.msg)
 
     def __init__(self, log_file=None, console_level="INFO", file_level="DEBUG", timezone="Europe/Warsaw",
                  max_json_length=500, trim_lists=True, verbose_api=False):
@@ -67,6 +84,7 @@ class PrettyLogger:
         # Dodaj handler konsoli
         console_handler = logging.StreamHandler()
         console_handler.setLevel(self.LEVELS[console_level]["level"])
+        console_handler.setFormatter(self.ColoredFormatter())
         self.logger.addHandler(console_handler)
 
         # Dodaj handler pliku, jeśli podano
@@ -74,38 +92,46 @@ class PrettyLogger:
             os.makedirs(os.path.dirname(log_file), exist_ok=True)
             file_handler = logging.FileHandler(log_file, encoding="utf-8")
             file_handler.setLevel(self.LEVELS[file_level]["level"])
+            file_handler.setFormatter(self.PlainFormatter())
             self.logger.addHandler(file_handler)
 
         self.info("Logger", "Inicjalizacja loggera zakończona pomyślnie", log_type="CONFIG")
 
-    def _format_message(self, level, module, message, log_type=None):
+    def _format_message(self, level, module, message, log_type=None, plain=False):
         """Formatuje wiadomość logu."""
         now = datetime.datetime.now(self.timezone)
         time_str = now.strftime("%Y-%m-%d %H:%M:%S")
 
         level_info = self.LEVELS[level]
 
-        # Podstawowe formatowanie
-        formatted = f"{level_info['color']}[{time_str}] {level_info['symbol']} [{level}]"
+        if plain:
+            # Formatowanie bez kolorów dla plików logów
+            formatted = f"[{time_str}] {level_info['symbol']} [{level}]"
 
-        # Dodaj typ logu, jeśli podano
-        if log_type and log_type in self.TYPES:
-            type_info = self.TYPES[log_type]
-            formatted += f" {type_info['color']}{type_info['symbol']} [{log_type}]"
+            # Dodaj typ logu, jeśli podano
+            if log_type and log_type in self.TYPES:
+                type_info = self.TYPES[log_type]
+                formatted += f" {type_info['symbol']} [{log_type}]"
 
-        # Dodaj moduł i wiadomość
-        formatted += f" {Style.BRIGHT}{Fore.WHITE}[{module}]{Style.RESET_ALL} {message}"
+            # Dodaj moduł i wiadomość
+            formatted += f" [{module}] {message}"
+        else:
+            # Formatowanie z kolorami dla konsoli
+            formatted = f"{level_info['color']}[{time_str}] {level_info['symbol']} [{level}]"
+
+            # Dodaj typ logu, jeśli podano
+            if log_type and log_type in self.TYPES:
+                type_info = self.TYPES[log_type]
+                formatted += f" {type_info['color']}{type_info['symbol']} [{log_type}]"
+
+            # Dodaj moduł i wiadomość
+            formatted += f" {Style.BRIGHT}{Fore.WHITE}[{module}]{Style.RESET_ALL} {message}"
 
         return formatted
 
     def _smart_trim(self, data, max_depth=2, current_depth=0):
         """
         Inteligentnie przycina złożone struktury danych, zachowując czytelność.
-
-        :param data: Dane do przycinania
-        :param max_depth: Maksymalna głębokość zagnieżdżenia
-        :param current_depth: Aktualna głębokość zagnieżdżenia
-        :return: Przycięta kopia danych
         """
         if current_depth >= max_depth:
             if isinstance(data, dict) and len(data) > 3:
@@ -128,9 +154,6 @@ class PrettyLogger:
     def _format_api_response(self, data):
         """
         Inteligentnie przetwarza odpowiedź API, pozostawiając tylko najważniejsze informacje.
-
-        :param data: Pełna odpowiedź API
-        :return: Przefiltrowana i uproszczona odpowiedź
         """
         if not self.verbose_api:
             # Jeśli nie chcemy pełnych odpowiedzi, wyciągamy kluczowe informacje
@@ -169,10 +192,6 @@ class PrettyLogger:
     def _log_json(self, data, max_length=None):
         """
         Inteligentne logowanie danych JSON z ograniczeniem długości.
-
-        :param data: Dane do zalogowania
-        :param max_length: Maksymalna długość wyjściowego tekstu
-        :return: Sformatowany tekst JSON
         """
         if max_length is None:
             max_length = self.max_json_length
@@ -191,13 +210,27 @@ class PrettyLogger:
 
     def _log(self, level, module, message, log_type=None, **kwargs):
         """Zapisuje log z określonym poziomem."""
-        formatted = self._format_message(level, module, message, log_type)
+        # Tworzenie dwóch formatów wiadomości - z kolorami i bez kolorów
+        formatted = self._format_message(level, module, message, log_type, plain=False)
+        plain_formatted = self._format_message(level, module, message, log_type, plain=True)
 
-        # Zapisz do loggera z odpowiednim poziomem
-        if level == "TRACE":
-            self.logger.log(5, formatted)  # Użyj zdefiniowanego poziomu TRACE
-        else:
-            getattr(self.logger, level.lower())(formatted)
+        # Niestandardowa obsługa log recordu, aby przechować obie wersje wiadomości
+        log_record = logging.LogRecord(
+            name=self.logger.name,
+            level=self.LEVELS[level]["level"] if level != "TRACE" else 5,
+            pathname="",
+            lineno=0,
+            msg=formatted,
+            args=(),
+            exc_info=None
+        )
+        # Dodajemy plain_msg jako atrybut, który zostanie użyty przez PlainFormatter
+        log_record.plain_msg = plain_formatted
+
+        # Przekazanie rekordu do wszystkich handlerów
+        for handler in self.logger.handlers:
+            if handler.level <= log_record.levelno:
+                handler.handle(log_record)
 
         # Jeśli są dodatkowe dane, wypisz je ładnie
         if kwargs:
@@ -216,28 +249,54 @@ class PrettyLogger:
                     filtered_kwargs[key] = value
 
             # Logujemy przetworzone dane
-            if level == "TRACE":
-                self._log_data(level, 5, **filtered_kwargs)
-            else:
-                self._log_data(level, **filtered_kwargs)
+            self._log_data(level, **filtered_kwargs)
 
-    def _log_data(self, level, log_level=None, **kwargs):
+    def _log_data(self, level, **kwargs):
         """Loguje dodatkowe dane jako JSON."""
+        log_level = 5 if level == "TRACE" else self.LEVELS[level]["level"]
+
         for key, value in kwargs.items():
             if value is not None:
                 try:
-                    # Jeśli to słownik lub lista, wydrukuj jako JSON
+                    # Przygotuj tekst dla konsoli (kolorowy)
+                    console_prefix = f"{Fore.CYAN}[DATA] {key}:"
+
+                    # Przygotuj tekst dla pliku (bez kolorów)
+                    file_prefix = f"[DATA] {key}:"
+
+                    # Logowanie w zależności od typu danych
                     if isinstance(value, (dict, list)):
                         formatted_json = self._log_json(value)
-                        if log_level:
-                            self.logger.log(log_level, f"{Fore.CYAN}[DATA] {key}:\n{formatted_json}")
-                        else:
-                            self.logger.debug(f"{Fore.CYAN}[DATA] {key}:\n{formatted_json}")
+
+                        # Tworzenie rekordów logów z różnymi formatami dla konsoli i pliku
+                        console_record = logging.LogRecord(
+                            name=self.logger.name,
+                            level=log_level,
+                            pathname="",
+                            lineno=0,
+                            msg=f"{console_prefix}\n{formatted_json}",
+                            args=(),
+                            exc_info=None
+                        )
+                        console_record.plain_msg = f"{file_prefix}\n{formatted_json}"
                     else:
-                        if log_level:
-                            self.logger.log(log_level, f"{Fore.CYAN}[DATA] {key}: {value}")
-                        else:
-                            self.logger.debug(f"{Fore.CYAN}[DATA] {key}: {value}")
+                        # Dla prostych wartości
+                        console_record = logging.LogRecord(
+                            name=self.logger.name,
+                            level=log_level,
+                            pathname="",
+                            lineno=0,
+                            msg=f"{console_prefix} {value}",
+                            args=(),
+                            exc_info=None
+                        )
+                        console_record.plain_msg = f"{file_prefix} {value}"
+
+                    # Przekazanie rekordów do handlerów
+                    for handler in self.logger.handlers:
+                        if handler.level <= log_level:
+                            handler.handle(console_record)
+
                 except Exception as e:
                     self.logger.error(f"Błąd podczas logowania danych: {e}")
 
@@ -269,6 +328,7 @@ class PrettyLogger:
         """Specjalny log dla statusu serwera."""
         if status:
             status_str = f"{Fore.GREEN}ONLINE"
+            plain_status = "ONLINE"
             players = server_data.get("players", {})
             player_count = players.get("online", 0)
             max_players = players.get("max", 0)
@@ -301,6 +361,7 @@ class PrettyLogger:
                 )
         else:
             status_str = f"{Fore.RED}OFFLINE"
+            plain_status = "OFFLINE"
             self.warning(
                 "ServerStatus",
                 f"Serwer {status_str}",
