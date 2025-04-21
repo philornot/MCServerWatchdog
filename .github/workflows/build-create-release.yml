@@ -1,6 +1,6 @@
 name: Build, Test, Release and Deploy
 
-# Konfiguracja uprawnień - niezbędna do aktualizacji repozytorium i publikowania pakietów
+# Konfiguracja uprawnień — niezbędna do aktualizacji repozytorium i publikowania pakietów
 permissions:
   contents: write  # Uprawnienia do pushowania zmian i tworzenia release'ów
   packages: write  # Uprawnienia do publikowania obrazów Docker
@@ -90,7 +90,7 @@ jobs:
               version_base="1.0"
             fi
 
-            IFS='.' read -r major minor patch <<< "$(echo $version_base | awk -F. '{ print $1, $2, $3 }')"
+            IFS='.' read -r major minor patch <<< "$(echo "$version_base" | awk -F. '{ printf "%s %s %s", $1, $2, ($3 == "" ? 0 : $3) }')"
 
             case $type in
               major)
