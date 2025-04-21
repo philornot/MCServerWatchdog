@@ -1,7 +1,10 @@
 import base64
 import datetime
+import hashlib
+import io
 import os
 import pickle
+import shutil
 
 import aiohttp
 import discord
@@ -20,22 +23,30 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID"))  # ID kanału, gdzie bot będzie wysyłał wiadomości
 MC_SERVER_ADDRESS = os.getenv("MC_SERVER_ADDRESS")  # Adres serwera MC (IP lub domena)
 MC_SERVER_PORT = int(os.getenv("MC_SERVER_PORT", "25565"))  # Domyślny port MC to 25565
+COMMAND_COOLDOWN = 30  # Czas odnowienia w sekundach
 LOG_FILE = os.getenv("LOG_FILE", "logs/mcserverwatch.log")  # Ścieżka do pliku logów
 DATA_FILE = os.getenv("DATA_FILE", "data/bot_data.pickle")  # Plik do zapisywania danych bota
 GUILD_ID = os.getenv("GUILD_ID")  # ID serwera Discord, opcjonalnie dla szybszego rozwoju komend
+# Konfiguracja związana z ikonami
+ENABLE_SERVER_ICONS = os.getenv("ENABLE_SERVER_ICONS", "true").lower() == "true"  # Włącz/wyłącz obsługę ikon
+SAVE_SERVER_ICONS = os.getenv("SAVE_SERVER_ICONS", "true").lower() == "true"  # Czy zapisywać ikony lokalnie
+SERVER_ICONS_DIR = os.getenv("SERVER_ICONS_DIR", "data/icons")  # Katalog do zapisywania ikon
+MAX_ICON_SIZE_KB = int(os.getenv("MAX_ICON_SIZE_KB", "256"))  # Maksymalny rozmiar ikony w KB
 
 # Inicjalizacja loggera
 logger = PrettyLogger(
     log_file=LOG_FILE,
     console_level="INFO",
     file_level="DEBUG",
-    max_json_length=300,   # Maksymalna długość JSONów w logach
-    trim_lists=True,       # Przycinaj długie listy
-    verbose_api=False      # Nie loguj pełnych odpowiedzi API
+    max_json_length=300,  # Maksymalna długość JSONów w logach
+    trim_lists=True,  # Przycinaj długie listy
+    verbose_api=False  # Nie loguj pełnych odpowiedzi API
 )
 
 # Słownik do przechowywania informacji o ostatniej aktywności graczy
 last_seen = {}
+
+last_command_usage = {}
 
 # Zapamiętana maksymalna liczba graczy na serwerze
 max_players = 20
@@ -54,6 +65,32 @@ last_embed_id = None
 
 # Format czasu warszawskiego
 warsaw_tz = pytz.timezone('Europe/Warsaw')
+
+
+def get_bot_version():
+    """
+    Odczytuje wersję bota z pliku version.txt lub zwraca wersję developerską.
+
+    Jeśli plik version.txt istnieje (generowany przez GitHub Actions),
+    funkcja odczytuje wersję z pliku. W przeciwnym razie zwraca
+    informację, że jest to wersja developerska.
+
+    Returns:
+        str: Wersja bota
+    """
+    try:
+        if os.path.exists("version.txt"):
+            with open("version.txt", "r") as f:
+                return f.read().strip()
+        return "dev-local"
+    except Exception as e:
+        logger.warning("Version", f"Nie udało się odczytać wersji: {e}", log_type="CONFIG")
+        return "unknown"
+
+
+# Zmienna globalna przechowująca wersję
+BOT_VERSION = get_bot_version()
+logger.info("Version", f"Uruchamianie bota w wersji: {BOT_VERSION}", log_type="CONFIG")
 
 
 def ensure_data_dir():
@@ -78,7 +115,8 @@ def save_bot_data():
         "last_embed_id": last_embed_id,
         "last_seen": last_seen,
         "max_players": max_players,
-        "last_known_online_time": last_known_online_time
+        "last_known_online_time": last_known_online_time,
+        "last_icon_update_time": datetime.datetime.now(warsaw_tz).timestamp()  # Dodaj czas ostatniej aktualizacji ikony
     }
     try:
         with open(DATA_FILE, "wb") as f:
@@ -127,32 +165,6 @@ def load_bot_data():
         logger.error("DataStorage", f"Błąd podczas ładowania danych: {e}", log_type="CONFIG")
 
 
-def get_bot_version():
-    """
-    Odczytuje wersję bota z pliku version.txt lub zwraca wersję developerską.
-
-    Jeśli plik version.txt istnieje (generowany przez GitHub Actions),
-    funkcja odczytuje wersję z pliku. W przeciwnym razie zwraca
-    informację, że jest to wersja developerska.
-
-    Returns:
-        str: Wersja bota
-    """
-    try:
-        if os.path.exists("version.txt"):
-            with open("version.txt", "r") as f:
-                return f.read().strip()
-        return "dev-local"
-    except Exception as e:
-        logger.warning("Version", f"Nie udało się odczytać wersji: {e}", log_type="CONFIG")
-        return "unknown"
-
-
-# Zmiennej globalna przechowująca wersję
-BOT_VERSION = get_bot_version()
-logger.info("Version", f"Uruchamianie bota w wersji: {BOT_VERSION}", log_type="CONFIG")
-
-
 def get_warsaw_time():
     """
     Zwraca aktualny czas w strefie czasowej Warszawy.
@@ -175,9 +187,6 @@ def format_time(dt):
     """
     return dt.strftime("%H:%M:%S %d-%m-%Y")
 
-
-# Rozwiązanie problemu polega na zmodyfikowaniu funkcji check_minecraft_server()
-# w pliku main.py, aby lepiej wykrywała stan serwera na podstawie MOTD i wersji
 
 async def check_minecraft_server():
     """
@@ -239,10 +248,10 @@ async def check_minecraft_server():
                     # Jeśli zarówno MOTD jak i wersja wskazują na offline, serwer jest na pewno offline
                     if motd_indicates_offline and version_indicates_offline:
                         logger.debug("ServerCheck",
-                                 "Wykryto jednoznacznie stan OFFLINE na podstawie MOTD i wersji",
-                                 log_type="API",
-                                 motd=motd_text,
-                                 version=version_text)
+                                     "Wykryto jednoznacznie stan OFFLINE na podstawie MOTD i wersji",
+                                     log_type="API",
+                                     motd=motd_text,
+                                     version=version_text)
                         data["online"] = False
                         logger.server_status(False, data)
                         return data
@@ -451,6 +460,290 @@ async def check_minecraft_server():
                 }
 
         return {"online": False, "error": error_msg}
+
+
+async def process_server_icon(server_data):
+    """
+    Przetwarza ikonę serwera Minecraft z danych API.
+
+    Funkcja szczegółowo analizuje dane ikony, wykonuje niezbędne konwersje i weryfikacje,
+    a następnie zwraca przygotowany obiekt ikony lub None w przypadku problemów.
+
+    Args:
+        server_data (dict): Dane serwera zawierające potencjalnie pole 'icon'
+
+    Returns:
+        tuple: (bytes, str, str) - Dane binarne ikony, jej format i hash lub (None, None, None) w przypadku błędu
+    """
+    try:
+        # Sprawdź, czy serwer jest online i czy ma ikonę
+        if not server_data.get("online", False):
+            logger.debug("ServerIcon", "Serwer jest offline, pomijam przetwarzanie ikony", log_type="DATA")
+            return None, None, None
+
+        if "icon" not in server_data:
+            logger.debug("ServerIcon", "Brak ikony w danych serwera", log_type="DATA")
+            return None, None, None
+
+        # Logowanie informacji początkowych
+        icon_data = server_data["icon"]
+        icon_length = len(icon_data) if icon_data else 0
+        logger.debug("ServerIcon", f"Rozpoczynam przetwarzanie ikony serwera (długość: {icon_length})", log_type="DATA")
+
+        # Sprawdź, czy dane ikony nie są puste
+        if not icon_data:
+            logger.warning("ServerIcon", "Dane ikony są puste", log_type="DATA")
+            return None, None, None
+
+        # Wykryj format danych - oczekiwany format to data URI lub czysty Base64
+        icon_format = "unknown"
+        try:
+            if icon_data.startswith('data:image/'):
+                # Dane w formacie data URI
+                format_marker = icon_data.split(';')[0].replace('data:image/', '')
+                icon_format = format_marker
+                logger.debug("ServerIcon", f"Wykryto format ikony: {icon_format} (data URI)", log_type="DATA")
+
+                # Wyodrębnij część Base64
+                try:
+                    icon_base64 = icon_data.split(',')[1]
+                    logger.debug("ServerIcon", f"Wyodrębniono część Base64 (długość: {len(icon_base64)})",
+                                 log_type="DATA")
+                except IndexError as e:
+                    logger.error("ServerIcon", f"Błąd podczas wyodrębniania Base64 z data URI: {e}", log_type="DATA")
+                    return None, None, None
+            else:
+                # Zakładamy, że to czysty Base64
+                icon_base64 = icon_data
+                # Próbujemy wykryć format na podstawie nagłówków Base64
+                if icon_base64.startswith('/9j/'):
+                    icon_format = 'jpeg'
+                elif icon_base64.startswith('iVBOR'):
+                    icon_format = 'png'
+                else:
+                    icon_format = 'png'  # Domyślnie zakładamy PNG
+
+                logger.debug("ServerIcon", f"Wykryto format ikony: {icon_format} (bezpośredni Base64)", log_type="DATA")
+        except Exception as e:
+            logger.error("ServerIcon", f"Błąd podczas analizy formatu ikony: {e}", log_type="DATA")
+            return None, None, None
+
+        # Napraw padding Base64 jeśli potrzeba
+        try:
+            padding_needed = 4 - (len(icon_base64) % 4) if len(icon_base64) % 4 else 0
+            if padding_needed > 0:
+                logger.debug("ServerIcon", f"Dodaję padding Base64: {padding_needed} znaków '='", log_type="DATA")
+                icon_base64 += "=" * padding_needed
+        except Exception as e:
+            logger.error("ServerIcon", f"Błąd podczas naprawiania paddingu Base64: {e}", log_type="DATA")
+            return None, None, None
+
+        # Dekoduj Base64 do danych binarnych
+        try:
+            server_icon_data = base64.b64decode(icon_base64)
+            icon_size = len(server_icon_data)
+
+            # Oblicz hash MD5 ikony - będzie używany do porównywania i nazewnictwa
+            icon_hash = hashlib.md5(server_icon_data).hexdigest()
+
+            logger.debug("ServerIcon", f"Pomyślnie zdekodowano ikonę (rozmiar: {icon_size} bajtów, hash: {icon_hash})",
+                         log_type="DATA")
+
+            # Weryfikacja rozmiaru
+            if icon_size < 100:
+                logger.warning("ServerIcon", f"Podejrzanie mały rozmiar ikony: {icon_size} bajtów", log_type="DATA")
+            elif icon_size > 1024 * 1024:  # Ponad 1 MB
+                logger.warning("ServerIcon", f"Bardzo duża ikona: {icon_size} bajtów, może być problem z przesłaniem",
+                               log_type="DATA")
+
+            return server_icon_data, icon_format, icon_hash
+        except Exception as e:
+            logger.error("ServerIcon", f"Błąd podczas dekodowania Base64: {e}", log_type="DATA")
+            return None, None, None
+
+    except Exception as e:
+        logger.error("ServerIcon", f"Nieoczekiwany błąd podczas przetwarzania ikony: {e}", log_type="DATA")
+        return None, None, None
+
+
+async def save_server_icon(server_icon_data, icon_format, icon_hash, server_address):
+    """
+    Inteligentnie zapisuje ikonę serwera, unikając duplikatów.
+
+    Używa systemu hashowania, aby identyczne ikony były przechowywane tylko raz.
+    Sprawdza, czy ikona się zmieniła przed zapisaniem jej ponownie.
+
+    Args:
+        server_icon_data (bytes): Dane binarne ikony
+        icon_format (str): Format ikony (png, jpeg, itp.)
+        icon_hash (str): Hash MD5 danych ikony
+        server_address (str): Adres serwera (używany w nazwie pliku)
+
+    Returns:
+        str: Ścieżka do zapisanego pliku lub None w przypadku błędu
+    """
+    if not server_icon_data or not icon_format or not icon_hash:
+        logger.debug("ServerIcon", "Brak danych ikony do zapisania", log_type="DATA")
+        return None
+
+    try:
+        # Utwórz katalog dla ikon, jeśli nie istnieje
+        icon_dir = SERVER_ICONS_DIR
+        os.makedirs(icon_dir, exist_ok=True)
+
+        # Utwórz bezpieczną nazwę pliku na podstawie adresu serwera i hasha
+        safe_server_name = "".join(c if c.isalnum() else "_" for c in server_address)
+
+        # Używamy jednej głównej ikony dla serwera
+        main_icon_path = os.path.join(icon_dir, f"{safe_server_name}_current.{icon_format}")
+
+        # Dodajemy też wersję z hashem dla celów debugowania i porównania
+        hash_icon_path = os.path.join(icon_dir, f"{safe_server_name}_{icon_hash}.{icon_format}")
+
+        # Sprawdź, czy ikona z tym hashem już istnieje
+        if os.path.exists(hash_icon_path):
+            logger.debug("ServerIcon", f"Ikona o tym samym hashu już istnieje: {hash_icon_path}", log_type="DATA")
+
+            # Aktualizuj główną ikonę jeśli się różni
+            if os.path.exists(main_icon_path):
+                try:
+                    with open(main_icon_path, "rb") as f:
+                        current_main_data = f.read()
+
+                    # Oblicz hash aktualnej głównej ikony
+                    current_main_hash = hashlib.md5(current_main_data).hexdigest()
+
+                    # Jeśli hash się różni, zaktualizuj główną ikonę
+                    if current_main_hash != icon_hash:
+                        with open(main_icon_path, "wb") as f:
+                            f.write(server_icon_data)
+                        logger.debug("ServerIcon", "Zaktualizowano główną ikonę serwera", log_type="DATA")
+                except Exception as e:
+                    logger.warning("ServerIcon", f"Błąd podczas aktualizacji głównej ikony: {e}", log_type="DATA")
+            else:
+                # Jeśli główna ikona nie istnieje, skopiuj istniejącą z hashem
+                try:
+                    shutil.copy2(hash_icon_path, main_icon_path)
+                    logger.debug("ServerIcon", "Utworzono główną ikonę serwera", log_type="DATA")
+                except Exception as e:
+                    logger.warning("ServerIcon", f"Błąd podczas kopiowania ikony: {e}", log_type="DATA")
+
+            return main_icon_path
+
+        else:
+            # Ta ikona jeszcze nie istnieje - zapisz nową wersję
+            logger.debug("ServerIcon", f"Zapisuję nową ikonę: {hash_icon_path}", log_type="DATA")
+
+            # Zapisz ikonę z hashem
+            with open(hash_icon_path, "wb") as f:
+                f.write(server_icon_data)
+
+            # Zapisz/zaktualizuj główną ikonę
+            with open(main_icon_path, "wb") as f:
+                f.write(server_icon_data)
+
+            # Usuń stare, nieużywane ikony, aby nie zabierały miejsca
+            await clean_old_icons(icon_dir, safe_server_name, icon_hash)
+
+            logger.debug("ServerIcon", "Zapisano nową wersję ikony i zaktualizowano główną ikonę", log_type="DATA")
+            return main_icon_path
+    except Exception as e:
+        logger.error("ServerIcon", f"Błąd podczas zapisywania ikony: {e}", log_type="DATA")
+        return None
+
+
+async def clean_old_icons(icons_dir, server_name_prefix, current_hash, max_keep=5):
+    """
+    Usuwa stare ikony dla danego serwera, zachowując najnowsze.
+
+    Args:
+        icons_dir (str): Katalog ikon
+        server_name_prefix (str): Prefiks nazwy pliku (nazwa serwera)
+        current_hash (str): Hash obecnie używanej ikony (nie usuwaj tej)
+        max_keep (int): Maksymalna liczba ikon do zachowania
+    """
+    try:
+        # Nie usuwaj pliku głównej ikony
+        current_file = f"{server_name_prefix}_current."
+
+        # Znajdź wszystkie ikony hash dla tego serwera
+        server_icons = []
+        for filename in os.listdir(icons_dir):
+            # Szukamy plików z hash - format: server_name_HASH.format
+            if (filename.startswith(server_name_prefix + "_") and
+                    current_hash not in filename and
+                    not filename.startswith(current_file) and
+                    "_" in filename and
+                    any(filename.endswith(f".{ext}") for ext in ["png", "jpg", "jpeg", "gif"])):
+                file_path = os.path.join(icons_dir, filename)
+                file_mtime = os.path.getmtime(file_path)
+                server_icons.append((file_mtime, file_path))
+
+        # Posortuj według czasu modyfikacji (od najnowszego)
+        server_icons.sort(reverse=True)
+
+        # Usuń nadmiarowe ikony, zachowując najnowsze
+        if len(server_icons) > max_keep:
+            for _, file_path in server_icons[max_keep:]:
+                try:
+                    os.remove(file_path)
+                    logger.debug("ServerIcon", f"Usunięto starą ikonę: {file_path}", log_type="DATA")
+                except Exception as e:
+                    logger.warning("ServerIcon", f"Nie udało się usunąć starej ikony {file_path}: {e}", log_type="DATA")
+    except Exception as e:
+        logger.error("ServerIcon", f"Błąd podczas czyszczenia starych ikon: {e}", log_type="DATA")
+
+
+async def attach_server_icon(message, server_icon_data, icon_format):
+    """
+    Dołącza ikonę serwera do istniejącej wiadomości Discord lub edytuje wiadomość dodając ikonę.
+
+    Args:
+        message (discord.Message): Wiadomość Discord do edycji
+        server_icon_data (bytes): Dane binarne ikony
+        icon_format (str): Format ikony
+
+    Returns:
+        bool: True jeśli udało się dołączyć ikonę, False w przeciwnym przypadku
+    """
+    if not server_icon_data:
+        return False
+
+    try:
+        # Utwórz plik do wysłania
+        icon_file = discord.File(
+            io.BytesIO(server_icon_data),
+            filename=f"server_icon.{icon_format}"
+        )
+
+        # Pobierz istniejący embed
+        embed = message.embeds[0] if message.embeds else None
+        if not embed:
+            logger.warning("ServerIcon", "Brak embeda w wiadomości, nie można dołączyć ikony", log_type="DISCORD")
+            return False
+
+        # Dołącz ikonę do embeda
+        embed.set_thumbnail(url=f"attachment://server_icon.{icon_format}")
+
+        # Edytuj wiadomość, dodając załącznik i zaktualizowany embed
+        try:
+            await message.edit(embed=embed, attachments=[icon_file])
+            logger.info("ServerIcon", "Pomyślnie dołączono ikonę do wiadomości", log_type="DISCORD")
+            return True
+        except discord.HTTPException as e:
+            # Sprawdź, czy błąd dotyczy limitu rozmiaru załącznika
+            if "Request entity too large" in str(e):
+                logger.warning("ServerIcon", "Ikona jest zbyt duża do wysłania jako załącznik", log_type="DISCORD")
+            else:
+                logger.error("ServerIcon", f"Błąd HTTP podczas edycji wiadomości z ikoną: {e}", log_type="DISCORD")
+            return False
+        except Exception as e:
+            logger.error("ServerIcon", f"Błąd podczas edycji wiadomości z ikoną: {e}", log_type="DISCORD")
+            return False
+
+    except Exception as e:
+        logger.error("ServerIcon", f"Nieoczekiwany błąd podczas dołączania ikony: {e}", log_type="DISCORD")
+        return False
 
 
 async def update_last_seen(online_players):
@@ -666,11 +959,11 @@ async def find_and_delete_previous_message():
     channel = client.get_channel(CHANNEL_ID)
     if not channel:
         logger.error("Cleanup", f"Nie znaleziono kanału o ID {CHANNEL_ID}", log_type="BOT")
-        return None
+        return False
 
     try:
         # Sprawdź zapisany ID ostatniej wiadomości
-        if last_embed_id:
+        if last_embed_id is not None and isinstance(last_embed_id, int):
             try:
                 message = await channel.fetch_message(last_embed_id)
                 await message.delete()
@@ -680,20 +973,10 @@ async def find_and_delete_previous_message():
                 return True
             except discord.NotFound:
                 logger.warning("Cleanup", f"Nie znaleziono wiadomości o ID {last_embed_id}", log_type="BOT")
+                last_embed_id = None  # Resetujemy, bo wiadomość nie istnieje
             except Exception as e:
                 logger.error("Cleanup", f"Błąd podczas usuwania wiadomości: {e}", log_type="BOT")
-
-        # Jeśli nie ma zapisanego ID lub wystąpił błąd, spróbuj znaleźć ostatnią wiadomość bota
-        async for message in channel.history(limit=50):
-            if message.author.id == client.user.id and message.embeds:
-                for embed in message.embeds:
-                    if f"Status serwera Minecraft: {MC_SERVER_ADDRESS}" in (embed.title or ""):
-                        await message.delete()
-                        logger.info("Cleanup", f"Usunięto znalezioną wiadomość bota (ID: {message.id})", log_type="BOT")
-                        return True
-
-        logger.info("Cleanup", "Nie znaleziono poprzedniej wiadomości do usunięcia", log_type="BOT")
-        return False
+                # Nie resetujemy last_embed_id, może się uda następnym razem
     except Exception as e:
         logger.error("Cleanup", f"Ogólny błąd podczas szukania i usuwania wiadomości: {e}", log_type="BOT")
         return False
@@ -704,8 +987,8 @@ async def on_ready():
     """
     Funkcja wywoływana po poprawnym uruchomieniu bota.
 
-    Inicjalizuje bota, ładuje zapisane dane, usuwa poprzednią wiadomość
-    i uruchamia zadanie cyklicznego sprawdzania serwera.
+    Inicjalizuje bota, ładuje zapisane dane, usuwa poprzednią wiadomość,
+    ustawia początkowy status i uruchamia zadanie cyklicznego sprawdzania serwera.
     """
     logger.bot_status("ready", client.user)
 
@@ -722,6 +1005,13 @@ async def on_ready():
 
     # Usuń poprzednią wiadomość - tylko przy starcie bota
     await find_and_delete_previous_message()
+
+    # Ustaw początkowy status jako "oczekiwanie" do czasu pierwszego sprawdzenia serwera
+    await client.change_presence(
+        status=discord.Status.idle,
+        activity=discord.Game(name="Sprawdzanie stanu serwera...")
+    )
+    logger.info("BotStatus", "Ustawiono początkowy status bota", log_type="BOT")
 
     # Uruchom zadanie cyklicznego sprawdzania serwera
     logger.info("Tasks", "Uruchamianie zadania sprawdzania serwera co 5 minut", log_type="BOT")
@@ -747,8 +1037,9 @@ async def check_server():
     Zadanie cyklicznie sprawdzające stan serwera i aktualizujące informacje.
 
     Ta funkcja jest wywoływana co 5 minut. Pobiera aktualny stan serwera,
-    aktualizuje informacje o graczach i edytuje istniejący embed zamiast
-    tworzenia nowych wiadomości.
+    aktualizuje informacje o graczach, edytuje istniejący embed zamiast
+    tworzenia nowych wiadomości i aktualizuje status bota Discord.
+    Inteligentnie zarządza ikonami serwera, unikając duplikatów.
     """
     global last_embed_id
 
@@ -763,38 +1054,60 @@ async def check_server():
         # Pobierz status serwera
         server_data = await check_minecraft_server()
 
+        # Aktualizuj status bota na podstawie stanu serwera
+        await update_bot_status(server_data)
+
         # Aktualizuj informacje o ostatnio widzianych graczach
         if server_data.get("online", False):
             player_list = server_data.get("players", {}).get("list", [])
             await update_last_seen(player_list)
 
+        # Przetwórz ikonę serwera (jeśli jest dostępna)
+        server_icon_data, icon_format, icon_hash = await process_server_icon(server_data)
+        has_valid_icon = server_icon_data is not None
+
+        # Ścieżka do ikony - używana w przypadku błędów wysyłania
+        icon_path = None
+
+        if has_valid_icon and ENABLE_SERVER_ICONS:
+            # Zapisz ikonę lokalnie, unikając duplikatów
+            if SAVE_SERVER_ICONS:
+                icon_path = await save_server_icon(server_icon_data, icon_format, icon_hash, MC_SERVER_ADDRESS)
+                if icon_path:
+                    logger.debug("Tasks", f"Użyto ikony z pliku: {icon_path}", log_type="BOT")
+
         # Utwórz nowy embed
         embed = create_minecraft_embed(server_data, last_seen)
 
-        # Ikona serwera (tylko do przechowywania, nie będziemy wysyłać jako załącznik)
-        server_icon = None
-        if server_data.get("online", False) and "icon" in server_data:
-            try:
-                icon_base64 = server_data["icon"].split(',')[-1] if "," in server_data["icon"] else server_data["icon"]
-                # Napraw padding Base64 jeśli potrzeba
-                padding = 4 - (len(icon_base64) % 4) if len(icon_base64) % 4 else 0
-                icon_base64 += "=" * padding
-                # Dekoduj i przechowuj jako dane binarne (nie tworzymy załącznika)
-                server_icon = base64.b64decode(icon_base64)
-                logger.debug("Embed", "Przygotowano dane ikony serwera")
-            except Exception as e:
-                logger.warning("Embed", f"Nie udało się zdekodować ikony serwera: {e}")
-                server_icon = None
+        # Edytuj istniejącą wiadomość lub wyślij nową
+        icon_attached = False
+        message = None
 
         # Strategia: zawsze edytuj istniejącą wiadomość, nie usuwaj i nie twórz nowej
-        if last_embed_id:
+        if last_embed_id is not None and isinstance(last_embed_id, int):
             try:
+                logger.debug("ServerIcon", f"Próbuję zaktualizować wiadomość {last_embed_id} z embedem",
+                             log_type="DISCORD")
                 message = await channel.fetch_message(last_embed_id)
-                # Zawsze edytuj istniejącą wiadomość, nawet jeśli zmienia się ikona
+
+                # Najpierw zaktualizuj sam embed bez ikony
                 await message.edit(embed=embed)
                 logger.discord_message("edited", last_embed_id, channel=channel.name)
-                save_bot_data()  # Zapisz dane po aktualizacji
+
+                # Teraz spróbuj dodać ikonę, jeśli jest dostępna i włączona
+                if has_valid_icon and ENABLE_SERVER_ICONS:
+                    try:
+                        logger.debug("ServerIcon", f"Próbuję dołączyć ikonę (hash: {icon_hash}) do wiadomości",
+                                     log_type="DISCORD")
+                        icon_attached = await attach_server_icon(message, server_icon_data, icon_format)
+                    except Exception as icon_error:
+                        logger.error("ServerIcon", f"Błąd podczas dołączania ikony: {icon_error}", log_type="DISCORD")
+                        # Kontynuuj, nawet jeśli ikona nie została dołączona
+
+                # Zapisz dane po aktualizacji
+                save_bot_data()
                 return
+
             except discord.NotFound:
                 logger.warning("Discord", f"Wiadomość o ID {last_embed_id} nie została znaleziona. Wysyłam nową.",
                                log_type="DISCORD")
@@ -803,52 +1116,387 @@ async def check_server():
                 logger.error("Discord", f"Błąd podczas edycji wiadomości: {e}.", log_type="DISCORD")
                 last_embed_id = None
 
-        # Jeśli doszliśmy tutaj, musimy wysłać nową wiadomość (np. pierwsza lub poprzednia usunięta)
-        # Wysyłamy zawsze bez załącznika ikony, aby uniknąć usuwania wiadomości w przyszłości
-        message = await channel.send(embed=embed)
-        logger.discord_message("sent", message.id, channel=channel.name)
-        last_embed_id = message.id
+        # Jeśli doszliśmy tutaj, musimy wysłać nową wiadomość
+        try:
+            # Spróbuj wysłać wiadomość z ikoną, jeśli jest dostępna i włączona
+            if has_valid_icon and ENABLE_SERVER_ICONS:
+                try:
+                    # Przygotuj plik ikony
+                    icon_file = discord.File(
+                        io.BytesIO(server_icon_data),
+                        filename=f"server_icon.{icon_format}"
+                    )
 
-        # Zapisz dane po wysłaniu nowej wiadomości
-        save_bot_data()
+                    # Ustaw miniaturę w embedzie
+                    embed.set_thumbnail(url=f"attachment://server_icon.{icon_format}")
+
+                    # Wyślij embed z ikoną
+                    message = await channel.send(embed=embed, file=icon_file)
+                    icon_attached = True
+                    logger.debug("ServerIcon", f"Pomyślnie wysłano nową wiadomość z ikoną (hash: {icon_hash})",
+                                 log_type="DISCORD")
+                except Exception as icon_error:
+                    logger.error("ServerIcon", f"Nie udało się wysłać wiadomości z ikoną: {icon_error}",
+                                 log_type="DISCORD")
+                    # Jeśli wysłanie z ikoną się nie powiedzie, wyślij bez ikony
+                    message = await channel.send(embed=embed)
+            else:
+                # Wyślij wiadomość bez ikony
+                message = await channel.send(embed=embed)
+
+            logger.discord_message("sent", message.id, channel=channel.name)
+            last_embed_id = message.id
+
+            # Dodaj dodatkowe informacje o ikonie do logu
+            if has_valid_icon and ENABLE_SERVER_ICONS:
+                logger.debug("ServerIcon",
+                             f"Status ikony dla nowej wiadomości: {'dołączona' if icon_attached else 'nie dołączona'}",
+                             log_type="DISCORD")
+
+            # Zapisz dane po wysłaniu nowej wiadomości
+            save_bot_data()
+
+        except Exception as send_error:
+            logger.critical("Tasks", f"Nie udało się wysłać nowej wiadomości: {send_error}", log_type="BOT")
 
     except Exception as e:
         logger.critical("Tasks", f"Wystąpił błąd w funkcji check_server: {e}", log_type="BOT")
 
 
-# Definicja komendy slash (/ski)
-@tree.command(
-    name="ski",
-    description="Sprawdza aktualny stan serwera Minecraft"
-)
-async def mc_server_command(interaction: discord.Interaction):
+async def check_server_for_command():
     """
-    Komenda slash do ręcznego sprawdzenia stanu serwera.
+    Specjalna wersja funkcji check_server do użycia w komendzie /ski.
+    Sprawdza stan serwera i aktualizuje embed, ale nie aktualizuje wszystkich powiązanych danych.
+    Zawiera rozszerzoną obsługę błędów i ikony serwera.
+    """
+    global last_embed_id
 
-    Pozwala użytkownikom na ręczne wywołanie sprawdzenia stanu serwera
-    bez czekania na automatyczne odświeżenie co 5 minut.
+    try:
+        channel = client.get_channel(CHANNEL_ID)
+        if not channel:
+            logger.error("Commands", f"Nie znaleziono kanału o ID {CHANNEL_ID}", log_type="BOT")
+            return False
+
+        # Pobierz status serwera
+        server_data = await check_minecraft_server()
+
+        # Aktualizuj status bota
+        await update_bot_status(server_data)
+
+        # Aktualizuj informacje o ostatnio widzianych graczach
+        if server_data.get("online", False):
+            player_list = server_data.get("players", {}).get("list", [])
+            await update_last_seen(player_list)
+
+        # Przetwórz ikonę serwera (jeśli jest dostępna)
+        server_icon_data, icon_format = await process_server_icon(server_data)
+        has_valid_icon = server_icon_data is not None
+
+        if has_valid_icon:
+            logger.debug("CommandServerIcon", f"Znaleziono ikonę w formacie {icon_format}", log_type="DATA")
+        else:
+            logger.debug("CommandServerIcon", "Brak ikony serwera lub serwer offline", log_type="DATA")
+
+        # Utwórz nowy embed
+        embed = create_minecraft_embed(server_data, last_seen)
+
+        # Edytuj istniejącą lub wyślij nową wiadomość
+        icon_attached = False
+        message = None
+
+        # Edytuj istniejącą wiadomość, jeśli istnieje
+        if last_embed_id is not None and isinstance(last_embed_id, int):
+            try:
+                message = await channel.fetch_message(last_embed_id)
+
+                # Najpierw aktualizujemy embed bez ikony
+                await message.edit(embed=embed)
+                logger.discord_message("edited", last_embed_id, channel=channel.name)
+
+                # Następnie próbujemy dodać ikonę, jeśli jest dostępna
+                if has_valid_icon:
+                    try:
+                        icon_attached = await attach_server_icon(message, server_icon_data, icon_format)
+                        logger.debug("CommandServerIcon",
+                                     f"Ikona {'została dołączona' if icon_attached else 'nie została dołączona'} do zaktualizowanej wiadomości",
+                                     log_type="DISCORD")
+                    except Exception as icon_error:
+                        logger.error("CommandServerIcon", f"Błąd podczas dołączania ikony: {icon_error}",
+                                     log_type="DISCORD")
+
+                save_bot_data()
+                return True
+
+            except discord.NotFound:
+                logger.warning("Commands", f"Wiadomość o ID {last_embed_id} nie została znaleziona. Wysyłam nową.",
+                               log_type="DISCORD")
+                last_embed_id = None
+            except Exception as e:
+                logger.error("Commands", f"Błąd podczas edycji wiadomości: {e}.", log_type="DISCORD")
+                last_embed_id = None
+
+        # Wysyłamy nową wiadomość, jeśli nie udało się edytować istniejącej
+        try:
+            # Spróbuj wysłać z ikoną, jeśli jest dostępna
+            if has_valid_icon:
+                try:
+                    # Przygotuj plik ikony
+                    icon_file = discord.File(
+                        io.BytesIO(server_icon_data),
+                        filename=f"server_icon.{icon_format}"
+                    )
+
+                    # Ustaw miniaturę w embedzie
+                    embed.set_thumbnail(url=f"attachment://server_icon.{icon_format}")
+
+                    # Wyślij embed z ikoną
+                    message = await channel.send(embed=embed, file=icon_file)
+                    icon_attached = True
+                    logger.debug("CommandServerIcon", "Wysłano nową wiadomość z ikoną", log_type="DISCORD")
+                except Exception as icon_error:
+                    logger.error("CommandServerIcon", f"Nie udało się wysłać ikony, wysyłam bez ikony: {icon_error}",
+                                 log_type="DISCORD")
+                    message = await channel.send(embed=embed)
+            else:
+                # Wyślij bez ikony
+                message = await channel.send(embed=embed)
+
+            logger.discord_message("sent", message.id, channel=channel.name)
+            last_embed_id = message.id
+            save_bot_data()
+            return True
+
+        except Exception as send_error:
+            logger.error("Commands", f"Nie udało się wysłać nowej wiadomości: {send_error}", log_type="DISCORD")
+            return False
+
+    except Exception as e:
+        logger.error("Commands", f"Błąd podczas aktualizacji stanu serwera: {e}", log_type="BOT")
+        return False
+
+
+@tree.command(
+    name="status",
+    description="Wymusza aktualizację statusu bota na podstawie stanu serwera"
+)
+async def update_status_command(interaction: discord.Interaction):
+    """
+    Komenda slash do ręcznego wymuszenia aktualizacji statusu bota.
+
+    Pozwala administratorom na natychmiastową aktualizację statusu bota bez
+    czekania na automatyczne sprawdzenie co 5 minut.
 
     Args:
         interaction (discord.Interaction): Obiekt interakcji z Discord
     """
-    logger.info("Commands", f"Użytkownik {interaction.user.name} użył komendy /ski", log_type="BOT")
-
-    # Sprawdź, czy jesteśmy na właściwym kanale
-    if interaction.channel_id != CHANNEL_ID:
-        logger.warning("Commands", f"Komenda wywołana na niewłaściwym kanale: {interaction.channel.name}",
-                       log_type="BOT")
-        await interaction.response.send_message(f"Ta komenda działa tylko na kanale <#{CHANNEL_ID}>", ephemeral=True)
-        return
+    logger.info("Commands", f"Użytkownik {interaction.user.name} użył komendy /status", log_type="BOT")
 
     # Odpowiedz na interakcję, by uniknąć timeoutu
     await interaction.response.defer(thinking=True)
 
-    # Wywołaj sprawdzenie serwera
-    await check_server()
+    # Pobierz status serwera
+    server_data = await check_minecraft_server()
+
+    # Aktualizuj status bota
+    await update_bot_status(server_data)
 
     # Odpowiedz użytkownikowi
-    await interaction.followup.send("Zaktualizowano status serwera!", ephemeral=True)
-    logger.info("Commands", "Wykonano ręczne sprawdzenie serwera", log_type="BOT")
+    status_text = "online" if server_data.get("online", False) else "offline"
+    player_count = server_data.get("players", {}).get("online", 0) if server_data.get("online", False) else 0
+
+    await interaction.followup.send(
+        f"Status bota został zaktualizowany! Serwer jest {status_text} z {player_count} graczami.",
+        ephemeral=True
+    )
+    logger.info("Commands", "Wykonano ręczną aktualizację statusu", log_type="BOT")
+
+
+async def update_bot_status(server_data):
+    """
+    Aktualizuje status bota Discord w zależności od stanu serwera Minecraft.
+
+    Status bota jest ustawiany następująco:
+    - Online (Aktywny): Gdy serwer jest online i są jacyś gracze
+    - Idle (Zaraz wracam): Gdy serwer jest online, ale nie ma graczy
+    - DND (Nie przeszkadzać): Gdy serwer jest offline
+
+    Dodatkowo, aktywność bota pokazuje liczbę graczy lub informację o stanie serwera.
+
+    Args:
+        server_data (dict): Dane o serwerze pobrane z API
+    """
+    try:
+        # Pobierz dostęp do zmiennej globalnej
+        global max_players
+
+        # Sprawdź status serwera
+        is_online = server_data.get("online", False)
+
+        # Pobierz dane o graczach
+        players = server_data.get("players", {})
+        player_count = players.get("online", 0) if is_online else 0
+        players_max = players.get("max", max_players)  # Używamy zmiennej globalnej jako fallback
+
+        # Ustaw odpowiedni status i aktywność
+        if is_online:
+            if player_count > 0:
+                # Serwer online z graczami — status Aktywny
+                status = discord.Status.online
+                activity_text = f"{player_count}/{players_max} graczy online"
+                logger.info("BotStatus", f"Zmieniam status na ONLINE - {activity_text}", log_type="BOT")
+            else:
+                # Serwer online bez graczy - status Zaraz wracam
+                status = discord.Status.idle
+                activity_text = "Serwer jest pusty"
+                logger.info("BotStatus", f"Zmieniam status na IDLE - {activity_text}", log_type="BOT")
+        else:
+            # Serwer offline - status Nie przeszkadzać
+            status = discord.Status.dnd
+            activity_text = "Serwer offline"
+            logger.info("BotStatus", f"Zmieniam status na DND - {activity_text}", log_type="BOT")
+
+        # Ustaw aktywność - "gra w..."
+        activity = discord.Game(name=activity_text)
+
+        # Aktualizuj status bota
+        await client.change_presence(status=status, activity=activity)
+
+    except Exception as e:
+        logger.error("BotStatus", f"Błąd podczas aktualizacji statusu bota: {e}", log_type="BOT")
+
+
+@tree.command(
+    name="ski",
+    description="Sprawdza aktualny stan serwera Minecraft i aktualizuje informacje"
+)
+async def mc_server_command(interaction: discord.Interaction):
+    """
+    Ulepszona komenda slash do ręcznego sprawdzenia stanu serwera.
+
+    Pozwala użytkownikom na ręczne wywołanie sprawdzenia stanu serwera
+    bez czekania na automatyczne odświeżenie co 5 minut. Zawiera obszerną
+    obsługę błędów i zapobiega nadużyciom poprzez ograniczenie częstotliwości
+    użycia.
+
+    Args:
+        interaction (discord.Interaction): Obiekt interakcji z Discord
+    """
+    try:
+        # Zapisz informację o użyciu komendy
+        user_id = interaction.user.id
+        user_name = interaction.user.name
+        current_time = datetime.datetime.now(warsaw_tz)
+
+        logger.info("Commands", f"Użytkownik {user_name} (ID: {user_id}) użył komendy /ski", log_type="BOT")
+
+        # Sprawdź cooldown (ograniczenie nadużyć)
+        if user_id in last_command_usage:
+            time_diff = (current_time - last_command_usage[user_id]).total_seconds()
+            if time_diff < COMMAND_COOLDOWN and not interaction.user.guild_permissions.administrator:
+                remaining = int(COMMAND_COOLDOWN - time_diff)
+                logger.warning("Commands",
+                               f"Użytkownik {user_name} próbował użyć komendy zbyt szybko (pozostało {remaining}s)",
+                               log_type="BOT")
+                await interaction.response.send_message(
+                    f"⏳ Proszę poczekać jeszcze {remaining} sekund przed ponownym użyciem tej komendy.",
+                    ephemeral=True
+                )
+                return
+
+        # Zapisz czas użycia komendy
+        last_command_usage[user_id] = current_time
+
+        # Sprawdź, czy jesteśmy na odpowiednim kanale lub czy użytkownik ma uprawnienia administratora
+        if interaction.channel_id != CHANNEL_ID and not interaction.user.guild_permissions.administrator:
+            channel = client.get_channel(CHANNEL_ID)
+            channel_name = channel.name if channel else f"#{CHANNEL_ID}"
+
+            logger.warning("Commands",
+                           f"Komenda wywołana na niewłaściwym kanale: {interaction.channel.name} przez {user_name}",
+                           log_type="BOT")
+
+            await interaction.response.send_message(
+                f"⚠️ Ta komenda działa tylko na kanale <#{CHANNEL_ID}> ({channel_name}).\n"
+                f"Możesz tam przejść i użyć komendy ponownie.",
+                ephemeral=True
+            )
+            return
+
+        # Odpowiedz na interakcję, by uniknąć timeoutu
+        await interaction.response.defer(thinking=True)
+
+        # Pobierz stan serwera bezpośrednio (nie wywołuj check_server, który aktualizuje embed)
+        try:
+            server_data = await check_minecraft_server()
+
+            # Sformatuj odpowiedź w zależności od stanu serwera
+            if server_data.get("online", False):
+                player_count = server_data.get("players", {}).get("online", 0)
+                max_players = server_data.get("players", {}).get("max", 0)
+                player_list = server_data.get("players", {}).get("list", [])
+
+                # Formatowanie listy graczy
+                players_text = ""
+                if player_count > 0 and player_list:
+                    players_text = "\n**Gracze online:**\n"
+                    for i, player in enumerate(player_list, 1):
+                        players_text += f"{i}. {player}\n"
+
+                # Odpowiedź dla serwera online
+                response = (
+                    f"✅ **Serwer jest ONLINE!**\n"
+                    f"👥 Gracze: {player_count}/{max_players}{players_text}"
+                    f"Status został zaktualizowany na kanale <#{CHANNEL_ID}>."
+                )
+            else:
+                # Odpowiedź dla serwera offline
+                response = (
+                    f"❌ **Serwer jest OFFLINE!**\n\n"
+                    f"Status został zaktualizowany na kanale <#{CHANNEL_ID}>."
+                )
+
+            # Teraz wywołaj check_server() aby zaktualizować embed na kanale
+            await check_server_for_command()
+
+            # Odpowiedz użytkownikowi
+            await interaction.followup.send(response, ephemeral=True)
+            logger.info("Commands", f"Pomyślnie wykonano komendę /ski dla {user_name}", log_type="BOT")
+
+        except Exception as e:
+            error_msg = str(e)
+            logger.error("Commands", f"Błąd podczas sprawdzania serwera: {error_msg}", log_type="BOT")
+            await interaction.followup.send(
+                f"⚠️ **Wystąpił błąd podczas sprawdzania stanu serwera**\n"
+                f"Błąd: ```{error_msg}```\n"
+                f"Spróbuj ponownie później lub skontaktuj się z administratorem.",
+                ephemeral=True
+            )
+
+    except Exception as e:
+        # Złap wszystkie pozostałe błędy
+        error_msg = str(e)
+        logger.critical("Commands", f"Nieoczekiwany błąd w komendzie /ski: {error_msg}", log_type="BOT")
+
+        # Próbuj odpowiedzieć użytkownikowi, jeśli to jeszcze możliwe
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    f"⚠️ **Wystąpił nieoczekiwany błąd**\n"
+                    f"```{error_msg}```\n"
+                    f"Zgłoś ten problem administratorowi bota.",
+                    ephemeral=True
+                )
+            else:
+                await interaction.followup.send(
+                    f"⚠️ **Wystąpił nieoczekiwany błąd**\n"
+                    f"```{error_msg}```\n"
+                    f"Zgłoś ten problem administratorowi bota.",
+                    ephemeral=True
+                )
+        except Exception as follow_up_error:
+            logger.critical("Commands",
+                            f"Nie można wysłać informacji o błędzie: {follow_up_error}",
+                            log_type="BOT")
 
 
 # Uruchom bota

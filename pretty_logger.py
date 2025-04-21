@@ -2,6 +2,7 @@ import datetime
 import json
 import logging
 import os
+import re
 
 import pytz
 from colorama import init, Fore, Back, Style
@@ -51,7 +52,6 @@ class PrettyLogger:
             if hasattr(record, 'plain_msg'):
                 return record.plain_msg
             # Usuwamy sekwencje ANSI z wiadomości
-            import re
             ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
             return ansi_escape.sub('', record.msg)
 
@@ -325,10 +325,19 @@ class PrettyLogger:
         self._log("CRITICAL", module, message, log_type, **kwargs)
 
     def server_status(self, status, server_data):
-        """Specjalny log dla statusu serwera."""
+        """
+        Specjalny log dla statusu serwera.
+
+        Tworzy log statusu serwera Minecraft bez używania kolorowania ANSI
+        w treści wiadomości, co zapewnia czystość plików logów.
+
+        Args:
+            status (bool): True jeśli serwer jest online, False w przeciwnym przypadku
+            server_data (dict): Dane serwera z API
+        """
         if status:
-            status_str = f"{Fore.GREEN}ONLINE"
-            plain_status = "ONLINE"
+            # Bez kolorowania w samej treści wiadomości
+            status_text = "ONLINE"
             players = server_data.get("players", {})
             player_count = players.get("online", 0)
             max_players = players.get("max", 0)
@@ -337,7 +346,7 @@ class PrettyLogger:
             # Używamy INFO zamiast DEBUG dla ważnych informacji
             self.info(
                 "ServerStatus",
-                f"Serwer {status_str} - Gracze: {player_count}/{max_players}",
+                f"Serwer {status_text} - Gracze: {player_count}/{max_players}",
                 log_type="SERVER",
                 players=player_list
             )
@@ -360,11 +369,10 @@ class PrettyLogger:
                     server_data=server_data
                 )
         else:
-            status_str = f"{Fore.RED}OFFLINE"
-            plain_status = "OFFLINE"
+            status_text = "OFFLINE"
             self.warning(
                 "ServerStatus",
-                f"Serwer {status_str}",
+                f"Serwer {status_text}",
                 log_type="SERVER",
                 error=server_data.get("error", "Unknown error")
             )
