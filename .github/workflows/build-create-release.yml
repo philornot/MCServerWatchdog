@@ -77,47 +77,25 @@ jobs:
             echo "has_errors=false" >> $GITHUB_OUTPUT
           fi
 
-      # Krok 6: Generowanie wersji z inkrementacją semantyczną
-      - name: Generate version
+      # Krok 6: Generowanie i walidacja wersji
+      - name: Generate and Validate Version
         id: version
         run: |
-          # Sprawdź typ wydania - domyślnie patch
-          RELEASE_TYPE="${{ github.event.inputs.release_type }}"
-          RELEASE_TYPE=${RELEASE_TYPE:-patch}
-          echo "Typ wydania: $RELEASE_TYPE"
-          
-          # Funkcja do parsowania i inkrementacji wersji SemVer
+          # Funkcja do inkrementacji wersji w zależności od podanego typu wydania
           increment_version() {
             local version=$1
             local type=$2
-            
-            # Jeśli wersja nie jest w formacie SemVer, konwertuj ją
+      
+            # Sprawdź, czy wersja jest w poprawnym formacie SemVer (np. 1.0.0)
             if [[ ! $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-              # Sprawdź czy istnieje version.txt
-              if [ -f "version.txt" ]; then
-                echo "Plik version.txt istnieje, próbuję odczytać wersję"
-                # Próbuj odczytać wersję z pliku
-                local file_version=$(cat version.txt)
-                # Usuń znaki + i wszystko po nich
-                file_version=${file_version%%+*}
-                # Sprawdź czy to jest SemVer
-                if [[ $file_version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-                  echo "Znaleziono poprawną wersję SemVer w pliku: $file_version" >&2  # Tylko na standardowe wyjście błędów
-                  version=$file_version
-                else
-                  echo "Wersja w pliku nie jest w formacie SemVer, używam domyślnej 1.0.0"
-                  version="1.0.0"
-                fi
-              else
-                echo "Brak pliku version.txt, używam domyślnej wersji 1.0.0"
-                version="1.0.0"
-              fi
+              echo "Niepoprawny format wersji w pliku version.txt lub brak poprawnej wersji. Ustawiam domyślną wersję 1.0.0."
+              version="1.0.0"
             fi
-            
-            # Podziel wersję na części
+      
+            # Rozdziel wersję na części: major, minor, patch
             IFS='.' read -r major minor patch <<< "$version"
-            
-            # Inkrementuj odpowiednią część
+      
+            # Inkrementuj odpowiednią część wersji w zależności od typu wydania
             case $type in
               major)
                 major=$((major + 1))
@@ -128,59 +106,39 @@ jobs:
                 minor=$((minor + 1))
                 patch=0
                 ;;
-              patch|*)  # patch jest domyślne
+              patch|*)  # Domyślnie inkrementuj patch (np. 0.0.X)
                 patch=$((patch + 1))
                 ;;
             esac
-            
+      
             # Zwróć nową wersję
             echo "$major.$minor.$patch"
           }
-          
-          # Spróbuj znaleźć ostatni tag wersji
-          echo "Szukam ostatniego tagu wersji..."
-          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
-          
-          if [ -n "$LAST_TAG" ]; then
-            echo "Znaleziono ostatni tag: $LAST_TAG"
-            # Usuń 'v' z tagu jeśli istnieje
-            if [[ $LAST_TAG == v* ]]; then
-              CURRENT_VERSION=${LAST_TAG#v}
-            else
-              CURRENT_VERSION=$LAST_TAG
-            fi
+      
+          # Pobierz typ wydania (major, minor, patch) z wejścia workflow
+          RELEASE_TYPE="${{ github.event.inputs.release_type }}"
+          RELEASE_TYPE=${RELEASE_TYPE:-patch}  # Domyślnie ustaw patch, jeśli brak wartości
+      
+          # Odczytaj wersję z pliku version.txt, jeśli istnieje
+          if [ -f "version.txt" ]; then
+            VERSION=$(cat version.txt | tr -d '[:space:]')  # Usuń białe znaki
           else
-            echo "Nie znaleziono żadnych tagów"
-            CURRENT_VERSION=""
+            VERSION="1.0.0"  # Ustaw domyślną wersję, jeśli plik nie istnieje
           fi
-          
-          # Inkrementuj wersję
-          VERSION=$(increment_version "$CURRENT_VERSION" "$RELEASE_TYPE")
-          echo "Bazowa wersja po inkrementacji: $VERSION"
-          
-          # Jeśli to automatyczny push do gałęzi lub nie określono typu wydania,
-          # dodaj datę i hash commita, aby utworzyć wersję build/dev
-          if [ "$RELEASE_TYPE" == "" ] || [ "${{ github.event_name }}" == "push" ]; then
-            COMMIT_HASH=$(git rev-parse --short HEAD)
-            BUILD_DATE=$(date +'%Y%m%d')
-            VERSION="${VERSION}+${BUILD_DATE}.${COMMIT_HASH}"
+      
+          # Wygeneruj nową wersję z inkrementacją
+          NEW_VERSION=$(increment_version "$VERSION" "$RELEASE_TYPE")
+      
+          # Walidacja wygenerowanej wersji
+          if [[ ! "$NEW_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Błąd: Wygenerowana wersja '$NEW_VERSION' jest nieprawidłowa."
+            exit 1
           fi
-          
-          echo "Poprzednia wersja: $CURRENT_VERSION"
-          echo "Nowa wersja: $VERSION"
-          
-          # Zapisz czystą wersję SemVer (bez metadanych) do późniejszego użycia
-          CLEAN_VERSION=${VERSION%%+*}
-          echo "Czysta wersja SemVer (bez metadanych): $CLEAN_VERSION"
-          echo "clean_version=$CLEAN_VERSION" >> $GITHUB_OUTPUT
-          
-          # Zapisz wersję do pliku
-          echo "$VERSION" > version.txt
-          cat version.txt
-          
-          # Zapisz wersję do outputs
-          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
-          echo "Wygenerowano wersję: $VERSION"
+      
+          # Wyprowadź poprawną wersję do pliku version.txt i outputs
+          echo "clean_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "$NEW_VERSION" > version.txt
+          echo "Wygenerowana wersja: $NEW_VERSION"
 
       # Krok 7: Commitowanie zmian w pliku version.txt
       - name: Commit version file
