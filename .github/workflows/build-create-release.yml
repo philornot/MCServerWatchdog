@@ -102,7 +102,7 @@ jobs:
                 file_version=${file_version%%+*}
                 # Sprawdź czy to jest SemVer
                 if [[ $file_version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-                  echo "Znaleziono poprawną wersję SemVer w pliku: $file_version"
+                  echo "Znaleziono poprawną wersję SemVer w pliku: $file_version" >&2  # Tylko na standardowe wyjście błędów
                   version=$file_version
                 else
                   echo "Wersja w pliku nie jest w formacie SemVer, używam domyślnej 1.0.0"
