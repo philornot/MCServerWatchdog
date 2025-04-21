@@ -33,7 +33,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install flake8 pytest
+          pip install flake8 pytest semver
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
       - name: Lint with flake8
@@ -50,8 +50,81 @@ jobs:
       - name: Generate version
         id: version
         run: |
-          # Domyślna wersja - data + hash
-          VERSION=$(date +'%Y.%m.%d')-$(git rev-parse --short HEAD)
+          # Sprawdź typ releasu - domyślnie patch
+          RELEASE_TYPE="${{ github.event.inputs.release_type }}"
+          RELEASE_TYPE=${RELEASE_TYPE:-patch}
+          echo "Release type: $RELEASE_TYPE"
+          
+          # Funkcja do parsowania i inkrementacji wersji SemVer
+          increment_version() {
+            local version=$1
+            local type=$2
+            
+            # Jeśli wersja nie jest w formacie SemVer, konwertuj ją
+            if [[ ! $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              # Sprawdź czy istnieje version.txt
+              if [ -f "version.txt" ]; then
+                # Próbuj odczytać wersję z pliku
+                local file_version=$(cat version.txt)
+                # Sprawdź czy to jest SemVer
+                if [[ $file_version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                  version=$file_version
+                else
+                  # Domyślna wersja startowa
+                  version="1.0.0"
+                fi
+              else
+                # Domyślna wersja startowa
+                version="1.0.0"
+              fi
+            fi
+            
+            # Podziel wersję na części
+            IFS='.' read -r major minor patch <<< "$version"
+            
+            # Inkrementuj odpowiednią część
+            case $type in
+              major)
+                major=$((major + 1))
+                minor=0
+                patch=0
+                ;;
+              minor)
+                minor=$((minor + 1))
+                patch=0
+                ;;
+              patch)
+                patch=$((patch + 1))
+                ;;
+            esac
+            
+            # Zwróć nową wersję
+            echo "$major.$minor.$patch"
+          }
+          
+          # Spróbuj znaleźć ostatni tag wersji
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          
+          # Usuń 'v' z tagu jeśli istnieje
+          if [[ $LAST_TAG == v* ]]; then
+            CURRENT_VERSION=${LAST_TAG#v}
+          else
+            CURRENT_VERSION=$LAST_TAG
+          fi
+          
+          # Inkrementuj wersję
+          VERSION=$(increment_version "$CURRENT_VERSION" "$RELEASE_TYPE")
+          
+          # Jeśli to automatyczny push, dodaj datę i hash commita
+          if [ "$RELEASE_TYPE" == "" ] || [ "${{ github.event_name }}" == "push" ]; then
+            COMMIT_HASH=$(git rev-parse --short HEAD)
+            BUILD_DATE=$(date +'%Y%m%d')
+            VERSION="${VERSION}+${BUILD_DATE}.${COMMIT_HASH}"
+          fi
+          
+          echo "Poprzednia wersja: $CURRENT_VERSION"
+          echo "Nowa wersja: $VERSION"
+          
           # Zapisz wersję do pliku
           echo "$VERSION" > version.txt
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
