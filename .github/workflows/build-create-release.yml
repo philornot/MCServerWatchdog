@@ -145,19 +145,35 @@ jobs:
             COMMIT_LIST=$(git log ${LAST_TAG}..HEAD --pretty=format:"%h||%an||%s" --reverse)
           fi
           
-          # Przygotuj mapę kategorii zmian
+          # Przygotuj mapę kategorii zmian - używamy zwykłych identyfikatorów jako kluczy
           declare -A CATEGORIES
           CATEGORIES=(
-            ["fix"]="🐛 Poprawki błędów"
-            ["feat"]="✨ Nowe funkcje"
-            ["docs"]="📚 Dokumentacja"
-            ["style"]="💎 Formatowanie kodu"
-            ["refactor"]="♻️ Refaktoryzacja"
-            ["perf"]="🚀 Optymalizacja"
-            ["test"]="🧪 Testy"
-            ["build"]="🔧 Build"
-            ["ci"]="🤖 CI/CD"
-            ["chore"]="🧹 Porządki"
+            ["fix"]="Poprawki błędów"
+            ["feat"]="Nowe funkcje"
+            ["docs"]="Dokumentacja"
+            ["style"]="Formatowanie kodu"
+            ["refactor"]="Refaktoryzacja"
+            ["perf"]="Optymalizacja"
+            ["test"]="Testy"
+            ["build"]="Build"
+            ["ci"]="CI/CD"
+            ["chore"]="Porządki"
+          )
+          
+          # Mapa emoji dla każdej kategorii - używana tylko do wyświetlania
+          declare -A CATEGORY_EMOJIS
+          CATEGORY_EMOJIS=(
+            ["fix"]="🐛"
+            ["feat"]="✨"
+            ["docs"]="📚"
+            ["style"]="💎"
+            ["refactor"]="♻️"
+            ["perf"]="🚀"
+            ["test"]="🧪"
+            ["build"]="🔧"
+            ["ci"]="🤖"
+            ["chore"]="🧹"
+            ["other"]="🔄"
           )
           
           # Funkcja sprawdzająca typ commita
@@ -175,14 +191,19 @@ jobs:
             echo "other"
           }
           
-          # Inicjalizacja zmiennych dla kategorii
-          for category in "${CATEGORIES[@]}"; do
-            eval "${category//:/_}_COMMITS=''"
+          # Inicjalizacja zmiennych dla każdej kategorii
+          # Używamy bezpiecznych identyfikatorów
+          for type in "${!CATEGORIES[@]}"; do
+            eval "${type}_commits=''"
           done
-          OTHER_COMMITS=""
+          other_commits=""
           
           # Przetwarzanie commitów i grupowanie ich
           while IFS= read -r line; do
+            if [ -z "$line" ]; then
+              continue
+            fi
+            
             IFS='||' read -r hash author message <<< "$line"
             commit_type=$(get_commit_type "$message")
             
@@ -196,10 +217,10 @@ jobs:
             
             # Dodaj do odpowiedniej kategorii
             if [ "$commit_type" != "other" ]; then
-              category_var="${CATEGORIES[$commit_type]//:/_}_COMMITS"
-              eval "$category_var=\"$formatted_entry\n\${$category_var}\""
+              # Używamy zmiennej z bezpieczną nazwą
+              eval "${commit_type}_commits=\"${formatted_entry}\n\${${commit_type}_commits}\""
             else
-              OTHER_COMMITS="${formatted_entry}\n${OTHER_COMMITS}"
+              other_commits="${formatted_entry}\n${other_commits}"
             fi
           done <<< "$COMMIT_LIST"
           
@@ -208,17 +229,20 @@ jobs:
           
           # Dodaj sekcje tylko jeśli mają zawartość
           for type in "${!CATEGORIES[@]}"; do
-            category_var="${CATEGORIES[$type]//:/_}_COMMITS"
-            eval "commits=\${$category_var}"
+            # Pobierz zawartość z bezpiecznej zmiennej
+            eval "commits=\${${type}_commits}"
             
             if [ -n "$commits" ]; then
-              FINAL_CHANGELOG="${FINAL_CHANGELOG}### ${CATEGORIES[$type]}\n${commits}\n\n"
+              emoji="${CATEGORY_EMOJIS[$type]}"
+              category_name="${CATEGORIES[$type]}"
+              FINAL_CHANGELOG="${FINAL_CHANGELOG}### ${emoji} ${category_name}\n${commits}\n\n"
             fi
           done
           
           # Dodaj inne zmiany (jeśli są)
-          if [ -n "$OTHER_COMMITS" ]; then
-            FINAL_CHANGELOG="${FINAL_CHANGELOG}### 🔄 Inne zmiany\n${OTHER_COMMITS}\n\n"
+          if [ -n "$other_commits" ]; then
+            emoji="${CATEGORY_EMOJIS[other]}"
+            FINAL_CHANGELOG="${FINAL_CHANGELOG}### ${emoji} Inne zmiany\n${other_commits}\n\n"
           fi
           
           # Jeśli nie ma zmian, dodaj informację
@@ -244,14 +268,10 @@ jobs:
           AUTHORS=$(echo "$COMMIT_LIST" | cut -d'||' -f2 | sort | uniq | tr '\n' ', ' | sed 's/,$//')
           echo "- Autorzy: $AUTHORS" >> changelog.md
           
-          # Escape tekstu dla GitHub Actions
-          FINAL_CHANGELOG_ESCAPED=$(cat changelog.md)
-          FINAL_CHANGELOG_ESCAPED="${FINAL_CHANGELOG_ESCAPED//'%'/'%25'}"
-          FINAL_CHANGELOG_ESCAPED="${FINAL_CHANGELOG_ESCAPED//$'\n'/'%0A'}"
-          FINAL_CHANGELOG_ESCAPED="${FINAL_CHANGELOG_ESCAPED//$'\r'/'%0D'}"
-          echo "CHANGELOG<<EOF" >> $GITHUB_OUTPUT
-          echo "$FINAL_CHANGELOG_ESCAPED" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          # Użyj cat z zapisanego pliku
+          echo 'CHANGELOG<<EOF' >> $GITHUB_OUTPUT
+          cat changelog.md >> $GITHUB_OUTPUT
+          echo 'EOF' >> $GITHUB_OUTPUT
 
       # Budowanie i publikowanie obrazu Docker
       - name: Set up Docker Buildx
