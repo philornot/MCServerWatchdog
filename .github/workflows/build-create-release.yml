@@ -1,5 +1,9 @@
 name: Build, Test, Release and Deploy
 
+permissions:
+  contents: write  # Daje uprawnienia do pushowania zmian do repozytorium
+  packages: write  # Potrzebne do publikowania obrazów Docker
+
 on:
   push:
     branches: [ main ]
@@ -129,6 +133,31 @@ jobs:
           echo "$VERSION" > version.txt
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
           echo "Generated version: $VERSION"
+
+      - name: Commit version file
+        run: |
+          # Konfiguracja Git
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          
+          # Sprawdź, czy plik version.txt został zmieniony
+          if [[ -n "$(git status --porcelain version.txt)" ]]; then
+            echo "Plik version.txt został zmieniony, tworzę commit..."
+            
+            # Dodaj plik version.txt do stage
+            git add version.txt
+            
+            # Utwórz commit
+            git commit -m "Aktualizacja version.txt do wersji ${{ steps.version.outputs.VERSION }}"
+            
+            # Wypchnij zmiany do repozytorium
+            # Uwaga: token GITHUB_TOKEN musi mieć uprawnienia do pushowania
+            git push https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git HEAD:main
+            
+            echo "Zaktualizowano plik version.txt w repozytorium"
+          else
+            echo "Plik version.txt nie uległ zmianie, pomijam commit"
+          fi
 
       # Przygotowanie opisu zmian (changelog)
       - name: Generate changelog
