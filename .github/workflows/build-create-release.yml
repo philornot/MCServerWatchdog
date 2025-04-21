@@ -1,63 +1,90 @@
 name: Build, Test, Release and Deploy
 
+# Konfiguracja uprawnień - niezbędna do aktualizacji repozytorium i publikowania pakietów
 permissions:
-  contents: write  # Daje uprawnienia do pushowania zmian do repozytorium
-  packages: write  # Potrzebne do publikowania obrazów Docker
+  contents: write  # Uprawnienia do pushowania zmian i tworzenia release'ów
+  packages: write  # Uprawnienia do publikowania obrazów Docker
 
+# Wyzwalacze workflow
 on:
+  # Uruchamianie przy push do głównej gałęzi - używamy dynamicznego wykrywania nazwy
   push:
-    branches: [ master ]
+    branches:
+      - 'master'  # Główna gałąź, zmień jeśli używasz innej nazwy
+      - 'main'    # Alternatywna popularna nazwa
+
+  # Uruchamianie ręczne z wyborem typu wersji
   workflow_dispatch:
     inputs:
       release_type:
-        description: 'Type of release'
+        description: 'Typ wydania'
         required: true
         default: 'patch'
         type: choice
         options:
-          - patch
-          - minor
-          - major
+          - patch   # Drobne poprawki (zwiększa 0.0.X)
+          - minor   # Nowe funkcje (zwiększa 0.X.0)
+          - major   # Zmiany łamiące kompatybilność (zwiększa X.0.0)
 
+# Definicja zadań
 jobs:
   build-test-release:
     runs-on: ubuntu-latest
+
     steps:
+      # Krok 1: Pobierz kod
       - name: Checkout code
         uses: actions/checkout@v3
         with:
-          fetch-depth: 0  # Pobierz pełną historię dla prawidłowego tagowania
+          fetch-depth: 0  # Pobierz pełną historię (potrzebne dla tagów i historii commitów)
 
-      # Testowanie kodu Python
+      # Krok 2: Wykryj nazwę bieżącej gałęzi i zapisz ją jako zmienną
+      - name: Get current branch
+        id: branch
+        run: |
+          BRANCH_NAME="${GITHUB_REF#refs/heads/}"
+          echo "Current branch name: $BRANCH_NAME"
+          echo "name=$BRANCH_NAME" >> $GITHUB_OUTPUT
+
+      # Krok 3: Konfiguracja Pythona
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
 
+      # Krok 4: Instalacja zależności
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install flake8 pytest semver
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
+      # Krok 5: Lintowanie kodu (sprawdzanie błędów składniowych)
       - name: Lint with flake8
+        id: lint
+        continue-on-error: true  # Nie zatrzymuj workflow w przypadku błędów lintowania
         run: |
           # Sprawdzenie tylko krytycznych błędów
-          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+          LINT_OUTPUT=$(flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics)
+          echo "::warning::$LINT_OUTPUT"
+          
+          # Zapisz czy wystąpiły błędy
+          if [ -n "$LINT_OUTPUT" ]; then
+            echo "Znaleziono problemy w kodzie, sprawdź szczegóły w logach"
+            echo "has_errors=true" >> $GITHUB_OUTPUT
+          else
+            echo "Analiza kodu przebiegła pomyślnie"
+            echo "has_errors=false" >> $GITHUB_OUTPUT
+          fi
 
-      # Można dodać testy, jeśli je masz
-      # - name: Test with pytest
-      #   run: |
-      #     pytest
-
-      # Generowanie wersji z inkrementacją - możesz wybrać typ przy ręcznym uruchomieniu
+      # Krok 6: Generowanie wersji z inkrementacją semantyczną
       - name: Generate version
         id: version
         run: |
-          # Sprawdź typ releasu - domyślnie patch
+          # Sprawdź typ wydania - domyślnie patch
           RELEASE_TYPE="${{ github.event.inputs.release_type }}"
           RELEASE_TYPE=${RELEASE_TYPE:-patch}
-          echo "Release type: $RELEASE_TYPE"
+          echo "Typ wydania: $RELEASE_TYPE"
           
           # Funkcja do parsowania i inkrementacji wersji SemVer
           increment_version() {
@@ -68,17 +95,21 @@ jobs:
             if [[ ! $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
               # Sprawdź czy istnieje version.txt
               if [ -f "version.txt" ]; then
+                echo "Plik version.txt istnieje, próbuję odczytać wersję"
                 # Próbuj odczytać wersję z pliku
                 local file_version=$(cat version.txt)
+                # Usuń znaki + i wszystko po nich
+                file_version=${file_version%%+*}
                 # Sprawdź czy to jest SemVer
                 if [[ $file_version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                  echo "Znaleziono poprawną wersję SemVer w pliku: $file_version"
                   version=$file_version
                 else
-                  # Domyślna wersja startowa
+                  echo "Wersja w pliku nie jest w formacie SemVer, używam domyślnej 1.0.0"
                   version="1.0.0"
                 fi
               else
-                # Domyślna wersja startowa
+                echo "Brak pliku version.txt, używam domyślnej wersji 1.0.0"
                 version="1.0.0"
               fi
             fi
@@ -97,7 +128,7 @@ jobs:
                 minor=$((minor + 1))
                 patch=0
                 ;;
-              patch)
+              patch|*)  # patch jest domyślne
                 patch=$((patch + 1))
                 ;;
             esac
@@ -107,19 +138,28 @@ jobs:
           }
           
           # Spróbuj znaleźć ostatni tag wersji
+          echo "Szukam ostatniego tagu wersji..."
           LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
           
-          # Usuń 'v' z tagu jeśli istnieje
-          if [[ $LAST_TAG == v* ]]; then
-            CURRENT_VERSION=${LAST_TAG#v}
+          if [ -n "$LAST_TAG" ]; then
+            echo "Znaleziono ostatni tag: $LAST_TAG"
+            # Usuń 'v' z tagu jeśli istnieje
+            if [[ $LAST_TAG == v* ]]; then
+              CURRENT_VERSION=${LAST_TAG#v}
+            else
+              CURRENT_VERSION=$LAST_TAG
+            fi
           else
-            CURRENT_VERSION=$LAST_TAG
+            echo "Nie znaleziono żadnych tagów"
+            CURRENT_VERSION=""
           fi
           
           # Inkrementuj wersję
           VERSION=$(increment_version "$CURRENT_VERSION" "$RELEASE_TYPE")
+          echo "Bazowa wersja po inkrementacji: $VERSION"
           
-          # Jeśli to automatyczny push do main, dodaj datę i hash commita
+          # Jeśli to automatyczny push do gałęzi lub nie określono typu wydania,
+          # dodaj datę i hash commita, aby utworzyć wersję build/dev
           if [ "$RELEASE_TYPE" == "" ] || [ "${{ github.event_name }}" == "push" ]; then
             COMMIT_HASH=$(git rev-parse --short HEAD)
             BUILD_DATE=$(date +'%Y%m%d')
@@ -129,20 +169,30 @@ jobs:
           echo "Poprzednia wersja: $CURRENT_VERSION"
           echo "Nowa wersja: $VERSION"
           
+          # Zapisz czystą wersję SemVer (bez metadanych) do późniejszego użycia
+          CLEAN_VERSION=${VERSION%%+*}
+          echo "Czysta wersja SemVer (bez metadanych): $CLEAN_VERSION"
+          echo "clean_version=$CLEAN_VERSION" >> $GITHUB_OUTPUT
+          
           # Zapisz wersję do pliku
           echo "$VERSION" > version.txt
-          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
-          echo "Generated version: $VERSION"
-
-      - name: Commit version file
-        run: |
-          # Konfiguracja Git
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
+          cat version.txt
           
-          # Pobierz nazwę bieżącej gałęzi
-          CURRENT_BRANCH="${GITHUB_REF#refs/heads/}"
-          echo "Bieżąca gałąź: $CURRENT_BRANCH"
+          # Zapisz wersję do outputs
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "Wygenerowano wersję: $VERSION"
+
+      # Krok 7: Commitowanie zmian w pliku version.txt
+      - name: Commit version file
+        id: commit
+        run: |
+          # Pobierz nazwę bieżącej gałęzi z poprzedniego kroku
+          BRANCH_NAME="${{ steps.branch.outputs.name }}"
+          echo "Bieżąca gałąź: $BRANCH_NAME"
+          
+          # Konfiguracja Git
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "GitHub Actions"
           
           # Sprawdź, czy plik version.txt został zmieniony
           if [[ -n "$(git status --porcelain version.txt)" ]]; then
@@ -154,27 +204,42 @@ jobs:
             # Utwórz commit
             git commit -m "Aktualizacja version.txt do wersji ${{ steps.version.outputs.VERSION }}"
             
-            # Wypchnij zmiany do repozytorium używając aktualnej gałęzi
-            git push origin HEAD:${CURRENT_BRANCH}
+            # Wypchnij zmiany do repozytorium
+            echo "Wypychanie zmian do gałęzi $BRANCH_NAME..."
+            git push origin HEAD:${BRANCH_NAME}
             
             echo "Zaktualizowano plik version.txt w repozytorium"
+            echo "committed=true" >> $GITHUB_OUTPUT
           else
             echo "Plik version.txt nie uległ zmianie, pomijam commit"
+            echo "committed=false" >> $GITHUB_OUTPUT
           fi
 
-      # Przygotowanie opisu zmian (changelog)
+      # Krok 8: Generowanie changelog
       - name: Generate changelog
         id: changelog
         run: |
+          # Użyj odpowiedniego punktu odniesienia do wyszukiwania commitów
+          if [[ "${{ steps.commit.outputs.committed }}" == "true" ]]; then
+            echo "Poprzedni commit zawierał aktualizację version.txt, uwzględniam w changelog"
+            # Użyj HEAD~1 jako bazy, aby uwzględnić ostatni commit aktualizujący wersję
+            GIT_REF_BASE="HEAD~1"
+          else
+            echo "Poprzedni commit nie zawierał aktualizacji version.txt"
+            GIT_REF_BASE="HEAD"
+          fi
+          
           # Pobierz commity od ostatniego taga lub początku historii
           LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
           
           if [ -z "$LAST_TAG" ]; then
-            # Jeśli nie ma tagów, weź wszystkie commity
+            echo "Nie znaleziono tagów, pobieram wszystkie commity (maksymalnie 20)"
+            # Jeśli nie ma tagów, weź wszystkie commity (ale ogranicz do 20)
             COMMIT_LIST=$(git log --pretty=format:"%h||%an||%s" --reverse | tail -n 20)
           else
+            echo "Znaleziono tag $LAST_TAG, pobieram commity od tego tagu"
             # Jeśli są tagi, weź commity od ostatniego taga
-            COMMIT_LIST=$(git log ${LAST_TAG}..HEAD --pretty=format:"%h||%an||%s" --reverse)
+            COMMIT_LIST=$(git log ${LAST_TAG}..${GIT_REF_BASE} --pretty=format:"%h||%an||%s" --reverse)
           fi
           
           # Przygotuj mapę kategorii zmian - używamy zwykłych identyfikatorów jako kluczy
@@ -223,38 +288,53 @@ jobs:
             echo "other"
           }
           
-          # Inicjalizacja zmiennych dla każdej kategorii
-          # Używamy bezpiecznych identyfikatorów
+          # Inicjalizacja zmiennych dla każdej kategorii - używamy bezpiecznych identyfikatorów
           for type in "${!CATEGORIES[@]}"; do
             eval "${type}_commits=''"
           done
           other_commits=""
           
-          # Przetwarzanie commitów i grupowanie ich
-          while IFS= read -r line; do
-            if [ -z "$line" ]; then
-              continue
-            fi
+          # Sprawdź, czy lista commitów jest pusta
+          if [ -z "$COMMIT_LIST" ]; then
+            echo "Nie znaleziono żadnych commitów od ostatniego tagu"
+          else 
+            echo "Znaleziono commity, przetwarzam..."
             
-            IFS='||' read -r hash author message <<< "$line"
-            commit_type=$(get_commit_type "$message")
-            
-            # Usuń prefix typu z treści commita
-            clean_message=$(echo "$message" | sed -E 's/^(feat|fix|docs|style|refactor|perf|test|build|ci|chore)(\([^)]+\))?:\s*//g')
-            clean_message=$(echo "$clean_message" | sed -E 's/\[(feat|fix|docs|style|refactor|perf|test|build|ci|chore)\]\s*//g')
-            clean_message=$(echo "$clean_message" | sed -E 's/\((feat|fix|docs|style|refactor|perf|test|build|ci|chore)\)\s*//g')
-            
-            # Ładne formatowanie wpisu changelog
-            formatted_entry="* ${clean_message} [${hash}](https://github.com/${{ github.repository }}/commit/${hash})"
-            
-            # Dodaj do odpowiedniej kategorii
-            if [ "$commit_type" != "other" ]; then
-              # Używamy zmiennej z bezpieczną nazwą
-              eval "${commit_type}_commits=\"${formatted_entry}\n\${${commit_type}_commits}\""
-            else
-              other_commits="${formatted_entry}\n${other_commits}"
-            fi
-          done <<< "$COMMIT_LIST"
+            # Przetwarzanie commitów i grupowanie ich
+            while IFS= read -r line; do
+              if [ -z "$line" ]; then
+                continue
+              fi
+              
+              # Parsuj linię na hash, autora i wiadomość, zabezpieczając przed specjalnymi znakami
+              IFS='||' read -r hash author message <<< "$line"
+              
+              if [ -z "$hash" ] || [ -z "$message" ]; then
+                echo "Pominięto niewłaściwy format commita: $line"
+                continue
+              fi
+              
+              # Określ typ commita
+              commit_type=$(get_commit_type "$message")
+              
+              # Usuń prefix typu z treści commita, z dodatkowym zabezpieczeniem przed błędami
+              clean_message=$(echo "$message" | sed -E 's/^(feat|fix|docs|style|refactor|perf|test|build|ci|chore)(\([^)]+\))?:\s*//g' | sed -E 's/\[(feat|fix|docs|style|refactor|perf|test|build|ci|chore)\]\s*//g' | sed -E 's/\((feat|fix|docs|style|refactor|perf|test|build|ci|chore)\)\s*//g')
+              
+              # Zabezpiecz tekst przed specjalnymi znakami w bash
+              clean_message=$(echo "$clean_message" | sed 's/"/\\"/g')
+              
+              # Ładne formatowanie wpisu changelog z linkiem do commita
+              formatted_entry="* ${clean_message} [${hash}](https://github.com/${{ github.repository }}/commit/${hash})"
+              
+              # Dodaj do odpowiedniej kategorii
+              if [ "$commit_type" != "other" ]; then
+                # Używamy zmiennej z bezpieczną nazwą
+                eval "${commit_type}_commits=\"\${${commit_type}_commits}\n${formatted_entry}\""
+              else
+                other_commits="${other_commits}\n${formatted_entry}"
+              fi
+            done <<< "$COMMIT_LIST"
+          fi
           
           # Przygotowanie każdej sekcji
           FINAL_CHANGELOG=""
@@ -274,7 +354,7 @@ jobs:
           # Dodaj inne zmiany (jeśli są)
           if [ -n "$other_commits" ]; then
             emoji="${CATEGORY_EMOJIS[other]}"
-            FINAL_CHANGELOG="${FINAL_CHANGELOG}### ${emoji} Inne zmiany\n${other_commits}\n\n"
+            FINAL_CHANGELOG="${FINAL_CHANGELOG}### ${emoji} Inne zmiany${other_commits}\n\n"
           fi
           
           # Jeśli nie ma zmian, dodaj informację
@@ -293,22 +373,47 @@ jobs:
           echo "- Wersja: ${{ steps.version.outputs.VERSION }}" >> changelog.md
           
           # Liczba commitów
-          COMMIT_COUNT=$(echo "$COMMIT_LIST" | wc -l)
-          echo "- Liczba commitów: $COMMIT_COUNT" >> changelog.md
+          if [ -n "$COMMIT_LIST" ]; then
+            COMMIT_COUNT=$(echo "$COMMIT_LIST" | wc -l)
+            echo "- Liczba commitów: $COMMIT_COUNT" >> changelog.md
+            
+            # Lista autorów
+            AUTHORS=$(echo "$COMMIT_LIST" | cut -d'||' -f2 | sort | uniq | tr '\n' ', ' | sed 's/,\s*$//')
+            if [ -n "$AUTHORS" ]; then
+              echo "- Autorzy: $AUTHORS" >> changelog.md
+            else
+              echo "- Autorzy: Nieznani" >> changelog.md
+            fi
+          else
+            echo "- Liczba commitów: 0" >> changelog.md
+            echo "- Autorzy: Brak nowych commitów" >> changelog.md
+          fi
           
-          # Lista autorów
-          AUTHORS=$(echo "$COMMIT_LIST" | cut -d'||' -f2 | sort | uniq | tr '\n' ', ' | sed 's/,$//')
-          echo "- Autorzy: $AUTHORS" >> changelog.md
-          
-          # Użyj cat z zapisanego pliku
+          # Zapisz changelog jako output
+          # Użyj heredoc formatu dla zachowania znaków nowej linii
           echo 'CHANGELOG<<EOF' >> $GITHUB_OUTPUT
           cat changelog.md >> $GITHUB_OUTPUT
           echo 'EOF' >> $GITHUB_OUTPUT
 
-      # Budowanie i publikowanie obrazu Docker
+      # Krok 9: Przygotowanie tagów Docker (zastąpienie + na -)
+      - name: Prepare Docker tags
+        id: docker_tags
+        run: |
+          # Pobierz wersję
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          
+          # Zastąp znak + na - w wersji dla tagu Dockera
+          DOCKER_VERSION="${VERSION//+/-}"
+          echo "Docker tag version: $DOCKER_VERSION"
+          
+          # Zapisz zmienną do outputs
+          echo "version=$DOCKER_VERSION" >> $GITHUB_OUTPUT
+
+      # Krok 10: Konfiguracja Docker Buildx
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v2
 
+      # Krok 11: Logowanie do GitHub Container Registry
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v2
         with:
@@ -316,6 +421,7 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Krok 12: Budowanie i publikowanie obrazu Docker
       - name: Build and push Docker image
         uses: docker/build-push-action@v4
         with:
@@ -323,19 +429,29 @@ jobs:
           push: true
           tags: |
             ghcr.io/${{ github.repository_owner }}/mcserverwatchdog:latest
-            ghcr.io/${{ github.repository_owner }}/mcserverwatchdog:${{ steps.version.outputs.VERSION }}
+            ghcr.io/${{ github.repository_owner }}/mcserverwatchdog:${{ steps.docker_tags.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # Tworzenie taga git dla wersji
+      # Krok 13: Tworzenie tagu Git dla wersji
       - name: Create Git Tag
         run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          git tag -a v${{ steps.version.outputs.VERSION }} -m "Version ${{ steps.version.outputs.VERSION }}"
-          git push origin v${{ steps.version.outputs.VERSION }}
+          # Konfiguracja Git
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "GitHub Actions"
+          
+          # Pobierz wersję
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          echo "Tworzenie tagu Git dla wersji: v$VERSION"
+          
+          # Utwórz tag lokalnie
+          git tag -a "v$VERSION" -m "Version $VERSION"
+          
+          # Wypchnij tag do repozytorium
+          git push origin "v$VERSION"
+          echo "Tag v$VERSION został utworzony i wysłany do repozytorium"
 
-      # Tworzenie releasu na GitHubie
+      # Krok 14: Tworzenie wydania na GitHubie
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
@@ -347,3 +463,21 @@ jobs:
           generate_release_notes: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Krok 15: Podsumowanie wykonania workflow
+      - name: Summary
+        run: |
+          echo "### 📦 MCServerWatchdog Deployment" >> $GITHUB_STEP_SUMMARY
+          echo "✅ **Wersja**: v${{ steps.version.outputs.VERSION }}" >> $GITHUB_STEP_SUMMARY
+          echo "🏷️ **Docker tag**: ghcr.io/${{ github.repository_owner }}/mcserverwatchdog:${{ steps.docker_tags.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "📅 **Data wydania**: $(date +'%d.%m.%Y %H:%M:%S')" >> $GITHUB_STEP_SUMMARY
+          
+          # Dodaj informację o lintowaniu
+          if [[ "${{ steps.lint.outputs.has_errors }}" == "true" ]]; then
+            echo "⚠️ **Ostrzeżenie**: Wykryto problemy w kodzie podczas lintowania" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "✅ **Linting**: Kod przeszedł wszystkie testy" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # Dodaj link do wydania
+          echo "🔗 **Link do wydania**: [v${{ steps.version.outputs.VERSION }}](https://github.com/${{ github.repository }}/releases/tag/v${{ steps.version.outputs.VERSION }})" >> $GITHUB_STEP_SUMMARY
