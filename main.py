@@ -169,6 +169,9 @@ def format_time(dt):
     return dt.strftime("%H:%M:%S %d-%m-%Y")
 
 
+# Rozwiązanie problemu polega na zmodyfikowaniu funkcji check_minecraft_server()
+# w pliku main.py, aby lepiej wykrywała stan serwera na podstawie MOTD i wersji
+
 async def check_minecraft_server():
     """
     Sprawdza status serwera Minecraft i zwraca dane w formie słownika.
@@ -205,19 +208,37 @@ async def check_minecraft_server():
                     # Podstawowy status z API
                     reported_online = data.get("online", False)
 
-                    # Analiza wiadomości MOTD
+                    # Analiza wiadomości MOTD - ULEPSZONA DETEKCJA
                     motd_indicates_offline = False
+                    motd_text = ""
                     if "motd" in data and "clean" in data["motd"] and data["motd"]["clean"]:
                         motd_text = " ".join(data["motd"]["clean"]).lower()
                         motd_indicates_offline = any(
                             keyword in motd_text for keyword in ["offline", "wyłączony", "niedostępny", "unavailable"])
+                        logger.debug("ServerCheck", f"Analiza MOTD: '{motd_text}'",
+                                     offline_detected=motd_indicates_offline, log_type="API")
 
-                    # Analiza wersji
+                    # Analiza wersji - ULEPSZONA DETEKCJA
                     version_indicates_offline = False
+                    version_text = ""
                     if "version" in data:
                         version_text = data.get("version", "").lower()
-                        version_indicates_offline = any(
-                            keyword in version_text for keyword in ["offline", "none", "● offline"])
+                        # Sprawdzamy czy wersja zawiera słowo "offline", niezależnie od użytego symbolu
+                        version_indicates_offline = "offline" in version_text
+                        logger.debug("ServerCheck", f"Analiza wersji: '{version_text}'",
+                                     offline_detected=version_indicates_offline, log_type="API")
+
+                    # PRIORYTETOWA WERYFIKACJA STANU OFFLINE
+                    # Jeśli zarówno MOTD jak i wersja wskazują na offline, serwer jest na pewno offline
+                    if motd_indicates_offline and version_indicates_offline:
+                        logger.debug("ServerCheck",
+                                 "Wykryto jednoznacznie stan OFFLINE na podstawie MOTD i wersji",
+                                 log_type="API",
+                                 motd=motd_text,
+                                 version=version_text)
+                        data["online"] = False
+                        logger.server_status(False, data)
+                        return data
 
                     # Zapisz maksymalną liczbę graczy, jeśli dostępna
                     if "players" in data and "max" in data["players"] and data["players"]["max"] > 0:
@@ -273,10 +294,13 @@ async def check_minecraft_server():
                     actual_online = reported_online
 
                     # Wskaźniki negatywne - sugerują, że serwer jest offline
+                    # ZWIĘKSZONA WAGA dla wskaźników z MOTD i wersji
                     negative_indicators = [
                         not reported_online,
-                        motd_indicates_offline,
-                        version_indicates_offline,
+                        motd_indicates_offline,  # Liczony raz
+                        motd_indicates_offline,  # Liczony drugi raz dla zwiększenia wagi
+                        version_indicates_offline,  # Liczony raz
+                        version_indicates_offline,  # Liczony drugi raz dla zwiększenia wagi
                         len(api_errors) > 0,
                     ]
 
@@ -322,6 +346,12 @@ async def check_minecraft_server():
                                      "Remis wskaźników, ale były niedawne aktywności graczy - uznajemy za ONLINE",
                                      log_type="API",
                                      active_players=active_players)
+                    else:
+                        # W przypadku remisu i braku graczy - zakładamy offline
+                        actual_online = False
+                        logger.debug("ServerCheck",
+                                     "Remis wskaźników, brak graczy - uznajemy za OFFLINE",
+                                     log_type="API")
 
                     # ===== FAZA 4: Aktualizacja statusu i danych =====
 
