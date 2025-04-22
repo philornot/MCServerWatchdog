@@ -426,25 +426,6 @@ jobs:
             echo "⚠️ **PRERELEASE**: Ta wersja jest oznaczona jako wydanie wstępne" >> $GITHUB_STEP_SUMMARY
           fi
           
-          echo "🏷️ **Docker tag**: ghcr.io/${{ github.repository_owner }}/mcserverwatchdog:${{ steps.docker_tags.outputs.version }}" >> $GITHUB_STEP_SUMMARY
-          echo "📅 **Data wydania**: $(date +'%d.%m.%Y %H:%M:%S')" >> $GITHUB_STEP_SUMMARY
-          echo "📥 **Paczka instalacyjna**: ${{ steps.create_package.outputs.filename }}" >> $GITHUB_STEP_SUMMARY
-          
-          # Dodaj informację o lintowaniu
-          if [[ "${{ steps.lint.outputs.has_errors }}" == "true" ]]; then
-            echo "⚠️ **Ostrzeżenie**: Wykryto problemy w kodzie podczas lintowania" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "✅ **Linting**: Kod przeszedł wszystkie testy" >> $GITHUB_STEP_SUMMARY
-          fi
-          
-          # Dodaj link do wydania
-          echo "🔗 **Link do wydania**: [v${{ steps.version.outputs.clean_version }}](https://github.com/${{ github.repository }}/releases/tag/v${{ steps.version.outputs.clean_version }})" >> $GITHUB_STEP_SUMMARY
-          
-          if [[ "${{ steps.version.outputs.is_prerelease }}" == "true" ]]; then
-            PRERELEASE_INFO="\n## ⚠️ Wydanie wstępne (prerelease)\n\nTo jest wydanie wstępne przeznaczone do testów. Może zawierać niestabilne funkcje lub błędy. Nie zaleca się używania w środowisku produkcyjnym.\n"
-            FINAL_CHANGELOG="${PRERELEASE_INFO}${FINAL_CHANGELOG}"
-          fi
-          
           # Zapisz changelog do pliku
           echo "# 📦 MCServerWatchdog v${{ steps.version.outputs.clean_version }}" > changelog.md
           echo "" >> changelog.md
@@ -520,53 +501,88 @@ jobs:
       - name: Create installation package
         id: create_package
         run: |
-          # Install the zip utility
-          sudo apt-get update && sudo apt-get install -y zip || { echo "::error::Failed to install zip utility"; exit 1; }
-
-          # Verify that the zip binary is available
-          which zip || { echo "::error::zip command not found"; exit 1; }
-          zip --version || { echo "::error::zip utility is not installed correctly"; exit 1; }
-
-          # Create the ZIP filename
-          ZIP_FILENAME="mcserverwatchdog-v${{ steps.version.outputs.clean_version }}.zip"
-          echo "Creating installation package: $ZIP_FILENAME"
-
-          # Prepare the temporary directory
+          set -e  # Zatrzymaj się przy pierwszym błędzie
+          
+          # Instalacja narzędzia zip
+          echo "Instalacja narzędzia zip..."
+          sudo apt-get update && sudo apt-get install -y zip
+          
+          # Weryfikacja instalacji zip
+          echo "Sprawdzanie dostępności narzędzia zip..."
+          which zip
+          
+          # Ustal nazwę pliku ZIP
+          VERSION="${{ steps.version.outputs.clean_version }}"
+          ZIP_FILENAME="mcserverwatchdog-v${VERSION}.zip"
+          echo "Tworzenie paczki instalacyjnej: ${ZIP_FILENAME}"
+          
+          # Przygotuj katalog tymczasowy
+          echo "Przygotowanie katalogu tymczasowego..."
+          rm -rf temp_package || true
           mkdir -p temp_package
-
-          # Copy required files (add checks for each file)
-          for file in main.py pretty_logger.py version.txt requirements.txt .env.example; do
+          
+          # Lista plików do skopiowania
+          echo "Kopiowanie plików do paczki..."
+          
+          # Wymagane pliki - jeśli którykolwiek brakuje, wyświetl ostrzeżenie ale kontynuuj
+          for file in main.py pretty_logger.py version.txt requirements.txt; do
             if [ -f "$file" ]; then
-              cp "$file" temp_package/
+              echo "Kopiowanie $file..."
+              cp "$file" temp_package/ || echo "⚠️ Ostrzeżenie: Nie udało się skopiować pliku $file"
             else
-              echo "::error::Missing file: $file"
-              exit 1
+              echo "⚠️ Ostrzeżenie: Brak pliku $file"
             fi
           done
-
-          # Add README to the package
-          cat > temp_package/README.txt <<'EOL'
-          MCServerWatchdog v${{ steps.version.outputs.clean_version }}
+          
+          # Opcjonalne pliki
+          if [ -f ".env.example" ]; then
+            cp ".env.example" temp_package/ || echo "⚠️ Ostrzeżenie: Nie udało się skopiować pliku .env.example"
+          fi
+          
+          # Tworzenie pliku README
+          echo "Tworzenie pliku README.txt..."
+          cat > temp_package/README.txt << EOF
+          MCServerWatchdog v${VERSION}
           ==========================================
-          Instructions for setup...
-          EOL
-
-          # Zip the folder
-          cd temp_package
-          zip -r "../${ZIP_FILENAME}" * || { echo "::error::Failed to create ZIP archive"; exit 1; }
-          cd ..
-
-          # Verify the ZIP file was created
+          
+          Aby uruchomić bota:
+          
+          1. Upewnij się, że masz zainstalowanego Pythona 3.10 lub nowszego
+          2. Zainstaluj wymagane biblioteki: pip install -r requirements.txt 
+          3. Skopiuj plik .env.example do .env i uzupełnij wszystkie wymagane dane
+          4. Uruchom bota: python main.py
+          
+          Więcej informacji znajdziesz na stronie projektu:
+          https://github.com/${{ github.repository }}
+          EOF
+          
+          # Sprawdzenie zawartości katalogu
+          echo "Zawartość katalogu temp_package:"
+          ls -la temp_package/
+          
+          # Sprawdzenie czy katalog nie jest pusty
+          if [ -z "$(ls -A temp_package/)" ]; then
+            echo "::error::Katalog temp_package jest pusty, nie można utworzyć paczki"
+            exit 1
+          fi
+          
+          # Tworzenie archiwum ZIP
+          echo "Tworzenie archiwum ZIP..."
+          (cd temp_package && zip -r "../${ZIP_FILENAME}" *)
+          
+          # Sprawdzenie czy plik ZIP został utworzony poprawnie
           if [ -f "${ZIP_FILENAME}" ]; then
-            echo "✅ Installation package successfully created"
+            echo "✅ Paczka instalacyjna została utworzona pomyślnie: ${ZIP_FILENAME}"
+            ls -lh "${ZIP_FILENAME}"
             echo "filename=${ZIP_FILENAME}" >> $GITHUB_OUTPUT
           else
-            echo "::error::Failed to create installation package"
+            echo "::error::Nie udało się utworzyć paczki instalacyjnej"
             exit 1
           fi
 
       # Krok 14: Tworzenie tagu Git dla wersji
       - name: Create Git Tag
+        if: success() # Wykonuj, tylko jeśli poprzednie kroki się powiodły
         run: |
           # Konfiguracja Git
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
@@ -590,6 +606,7 @@ jobs:
 
       # Krok 15: Tworzenie wydania na GitHubie z dołączonym ZIP
       - name: Create GitHub Release
+        if: success() && steps.create_package.outputs.filename != ''
         uses: softprops/action-gh-release@v1
         with:
           tag_name: v${{ steps.version.outputs.clean_version }}
@@ -605,25 +622,38 @@ jobs:
 
       # Krok 16: Podsumowanie wykonania workflow
       - name: Summary
+        if: always()
         run: |
           echo "### 📦 MCServerWatchdog Deployment" >> $GITHUB_STEP_SUMMARY
-          echo "✅ **Wersja**: v${{ steps.version.outputs.clean_version }}" >> $GITHUB_STEP_SUMMARY
           
-          # Dodaj informację o prerelease
-          if [[ "${{ steps.version.outputs.is_prerelease }}" == "true" ]]; then
-            echo "⚠️ **PRERELEASE**: Ta wersja jest oznaczona jako wydanie wstępne" >> $GITHUB_STEP_SUMMARY
-          fi
-          
-          echo "🏷️ **Docker tag**: ghcr.io/${{ github.repository_owner }}/mcserverwatchdog:${{ steps.docker_tags.outputs.version }}" >> $GITHUB_STEP_SUMMARY
-          echo "📅 **Data wydania**: $(date +'%d.%m.%Y %H:%M:%S')" >> $GITHUB_STEP_SUMMARY
-          echo "📥 **Paczka instalacyjna**: ${{ steps.create_package.outputs.filename }}" >> $GITHUB_STEP_SUMMARY
-          
-          # Dodaj informację o lintowaniu
-          if [[ "${{ steps.lint.outputs.has_errors }}" == "true" ]]; then
-            echo "⚠️ **Ostrzeżenie**: Wykryto problemy w kodzie podczas lintowania" >> $GITHUB_STEP_SUMMARY
+          if [[ "${{ job.status }}" == "success" ]]; then
+            echo "✅ **Status**: Sukces" >> $GITHUB_STEP_SUMMARY
+            echo "✅ **Wersja**: v${{ steps.version.outputs.clean_version }}" >> $GITHUB_STEP_SUMMARY
+            
+            # Dodaj informację o prerelease
+            if [[ "${{ steps.version.outputs.is_prerelease }}" == "true" ]]; then
+              echo "⚠️ **PRERELEASE**: Ta wersja jest oznaczona jako wydanie wstępne" >> $GITHUB_STEP_SUMMARY
+            fi
+            
+            echo "🏷️ **Docker tag**: ghcr.io/${{ github.repository_owner }}/mcserverwatchdog:${{ steps.docker_tags.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+            echo "📅 **Data wydania**: $(date +'%d.%m.%Y %H:%M:%S')" >> $GITHUB_STEP_SUMMARY
+            
+            if [[ -n "${{ steps.create_package.outputs.filename }}" ]]; then
+              echo "📥 **Paczka instalacyjna**: ${{ steps.create_package.outputs.filename }}" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "❌ **Paczka instalacyjna**: Nie utworzono" >> $GITHUB_STEP_SUMMARY
+            fi
+            
+            # Dodaj informację o lintowaniu
+            if [[ "${{ steps.lint.outputs.has_errors }}" == "true" ]]; then
+              echo "⚠️ **Ostrzeżenie**: Wykryto problemy w kodzie podczas lintowania" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "✅ **Linting**: Kod przeszedł wszystkie testy" >> $GITHUB_STEP_SUMMARY
+            fi
+            
+            # Dodaj link do wydania
+            echo "🔗 **Link do wydania**: [v${{ steps.version.outputs.clean_version }}](https://github.com/${{ github.repository }}/releases/tag/v${{ steps.version.outputs.clean_version }})" >> $GITHUB_STEP_SUMMARY
           else
-            echo "✅ **Linting**: Kod przeszedł wszystkie testy" >> $GITHUB_STEP_SUMMARY
+            echo "❌ **Status**: Niepowodzenie" >> $GITHUB_STEP_SUMMARY
+            echo "❌ **Przyczyna**: Proces CI/CD nie zakończył się pomyślnie" >> $GITHUB_STEP_SUMMARY
           fi
-          
-          # Dodaj link do wydania
-          echo "🔗 **Link do wydania**: [v${{ steps.version.outputs.clean_version }}](https://github.com/${{ github.repository }}/releases/tag/v${{ steps.version.outputs.clean_version }})" >> $GITHUB_STEP_SUMMARY
