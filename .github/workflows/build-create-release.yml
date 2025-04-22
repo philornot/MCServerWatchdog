@@ -520,55 +520,48 @@ jobs:
       - name: Create installation package
         id: create_package
         run: |
-          # Zainstaluj narzędzie zip
-          sudo apt-get update && sudo apt-get install -y zip
+          # Install the zip utility
+          sudo apt-get update && sudo apt-get install -y zip || { echo "::error::Failed to install zip utility"; exit 1; }
 
-          # Utwórz nazwę pliku ZIP
+          # Verify that the zip binary is available
+          which zip || { echo "::error::zip command not found"; exit 1; }
+          zip --version || { echo "::error::zip utility is not installed correctly"; exit 1; }
+
+          # Create the ZIP filename
           ZIP_FILENAME="mcserverwatchdog-v${{ steps.version.outputs.clean_version }}.zip"
-          echo "Tworzenie paczki instalacyjnej: $ZIP_FILENAME"
+          echo "Creating installation package: $ZIP_FILENAME"
 
-          # Utwórz tymczasowy katalog
+          # Prepare the temporary directory
           mkdir -p temp_package
 
-          # Skopiuj niezbędne pliki
-          cp main.py temp_package/ || echo "Błąd kopiowania main.py"
-          cp pretty_logger.py temp_package/ || echo "Błąd kopiowania pretty_logger.py"
-          cp version.txt temp_package/ || echo "Błąd kopiowania version.txt"
-          cp requirements.txt temp_package/ || echo "Błąd kopiowania requirements.txt"
-          cp .env.example temp_package/.env.example || echo "Błąd kopiowania .env.example"
+          # Copy required files (add checks for each file)
+          for file in main.py pretty_logger.py version.txt requirements.txt .env.example; do
+            if [ -f "$file" ]; then
+              cp "$file" temp_package/
+            else
+              echo "::error::Missing file: $file"
+              exit 1
+            fi
+          done
 
-          # Dodaj README do paczki
-          cat > temp_package/README.txt << 'EOL'
+          # Add README to the package
+          cat > temp_package/README.txt <<'EOL'
           MCServerWatchdog v${{ steps.version.outputs.clean_version }}
           ==========================================
-
-          Aby uruchomić bota:
-
-          1. Upewnij się, że masz zainstalowanego Pythona 3.10 lub nowszego
-          2. Zainstaluj wymagane biblioteki: pip install -r requirements.txt
-          3. Skopiuj plik .env.example do .env i uzupełnij wszystkie wymagane dane
-          4. Uruchom bota: python main.py
-
-          Więcej informacji znajdziesz na stronie projektu:
-          https://github.com/${{ github.repository }}
+          Instructions for setup...
           EOL
 
-          # Wyświetl zawartość katalogu przed zipowaniem
-          echo "Zawartość katalogu temp_package:"
-          ls -la temp_package/
-
-          # Utwórz archiwum ZIP
+          # Zip the folder
           cd temp_package
-          zip -r "../${ZIP_FILENAME}" * || { echo "Błąd podczas tworzenia archiwum ZIP"; exit 1; }
+          zip -r "../${ZIP_FILENAME}" * || { echo "::error::Failed to create ZIP archive"; exit 1; }
           cd ..
 
-          # Sprawdź czy plik ZIP został utworzony
+          # Verify the ZIP file was created
           if [ -f "${ZIP_FILENAME}" ]; then
-            echo "✅ Paczka instalacyjna została utworzona pomyślnie"
-            ls -lh "${ZIP_FILENAME}"
+            echo "✅ Installation package successfully created"
             echo "filename=${ZIP_FILENAME}" >> $GITHUB_OUTPUT
           else
-            echo "::error::Nie udało się utworzyć paczki instalacyjnej"
+            echo "::error::Failed to create installation package"
             exit 1
           fi
 
