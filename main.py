@@ -38,7 +38,7 @@ logger = PrettyLogger(
     log_file=LOG_FILE,
     console_level="INFO",
     file_level="DEBUG",
-    max_json_length=300,  # Maksymalna długość JSONów w logach
+    max_json_length=300,  # Maksymalna długość JSON-ów w logach
     trim_lists=True,  # Przycinaj długie listy
     verbose_api=False  # Nie loguj pełnych odpowiedzi API
 )
@@ -83,8 +83,8 @@ def get_bot_version():
             with open("version.txt", "r") as f:
                 return f.read().strip()
         return "dev-local"
-    except Exception as e:
-        logger.warning("Version", f"Nie udało się odczytać wersji: {e}", log_type="CONFIG")
+    except Exception as ex:
+        logger.warning("Version", f"Nie udało się odczytać wersji: {ex}", log_type="CONFIG")
         return "unknown"
 
 
@@ -122,8 +122,8 @@ def save_bot_data():
         with open(DATA_FILE, "wb") as f:
             pickle.dump(data, f)
         logger.debug("DataStorage", f"Zapisano dane bota do {DATA_FILE}", log_type="CONFIG")
-    except Exception as e:
-        logger.error("DataStorage", f"Błąd podczas zapisywania danych: {e}", log_type="CONFIG")
+    except Exception as ex:
+        logger.error("DataStorage", f"Błąd podczas zapisywania danych: {ex}", log_type="CONFIG")
 
 
 def load_bot_data():
@@ -161,8 +161,8 @@ def load_bot_data():
                              log_type="CONFIG")
         else:
             logger.debug("DataStorage", f"Nie znaleziono pliku danych {DATA_FILE}", log_type="CONFIG")
-    except Exception as e:
-        logger.error("DataStorage", f"Błąd podczas ładowania danych: {e}", log_type="CONFIG")
+    except Exception as ex:
+        logger.error("DataStorage", f"Błąd podczas ładowania danych: {ex}", log_type="CONFIG")
 
 
 def get_warsaw_time():
@@ -239,13 +239,13 @@ async def check_minecraft_server():
                     version_text = ""
                     if "version" in data:
                         version_text = data.get("version", "").lower()
-                        # Sprawdzamy czy wersja zawiera słowo "offline", niezależnie od użytego symbolu
+                        # Sprawdzamy, czy wersja zawiera słowo "offline", niezależnie od użytego symbolu
                         version_indicates_offline = "offline" in version_text
                         logger.debug("ServerCheck", f"Analiza wersji: '{version_text}'",
                                      offline_detected=version_indicates_offline, log_type="API")
 
-                    # PRIORYTETOWA WERYFIKACJA STANU OFFLINE
-                    # Jeśli zarówno MOTD jak i wersja wskazują na offline, serwer jest na pewno offline
+                    # PRIORYTETOWA WERYFIKACJA STANU OFFLINE,
+                    # Jeśli zarówno MOTD, jak i wersja wskazują na offline, serwer jest na pewno offline
                     if motd_indicates_offline and version_indicates_offline:
                         logger.debug("ServerCheck",
                                      "Wykryto jednoznacznie stan OFFLINE na podstawie MOTD i wersji",
@@ -309,7 +309,7 @@ async def check_minecraft_server():
                     # Domyślnie przyjmujemy status z API
                     actual_online = reported_online
 
-                    # Wskaźniki negatywne - sugerują, że serwer jest offline
+                    # Wskaźniki negatywne — sugerują, że serwer jest offline
                     # ZWIĘKSZONA WAGA dla wskaźników z MOTD i wersji
                     negative_indicators = [
                         not reported_online,
@@ -435,9 +435,12 @@ async def check_minecraft_server():
                                 "hostname": MC_SERVER_ADDRESS
                             }
 
-    except Exception as e:
+                    # Jeśli doszliśmy tutaj, nie mamy wystarczających danych, by uznać serwer za online
+                    return {"online": False, "error": error_msg}
+
+    except Exception as ex:
         # Obsługa innych wyjątków
-        error_msg = f"Wyjątek: {str(e)}"
+        error_msg = f"Wyjątek: {str(ex)}"
         logger.api_request(api_url, error=error_msg)
 
         # Próba zwrócenia sensownych danych mimo wyjątku
@@ -512,8 +515,8 @@ async def process_server_icon(server_data):
                     icon_base64 = icon_data.split(',')[1]
                     logger.debug("ServerIcon", f"Wyodrębniono część Base64 (długość: {len(icon_base64)})",
                                  log_type="DATA")
-                except IndexError as e:
-                    logger.error("ServerIcon", f"Błąd podczas wyodrębniania Base64 z data URI: {e}", log_type="DATA")
+                except IndexError as ex:
+                    logger.error("ServerIcon", f"Błąd podczas wyodrębniania Base64 z data URI: {ex}", log_type="DATA")
                     return None, None, None
             else:
                 # Zakładamy, że to czysty Base64
@@ -527,8 +530,8 @@ async def process_server_icon(server_data):
                     icon_format = 'png'  # Domyślnie zakładamy PNG
 
                 logger.debug("ServerIcon", f"Wykryto format ikony: {icon_format} (bezpośredni Base64)", log_type="DATA")
-        except Exception as e:
-            logger.error("ServerIcon", f"Błąd podczas analizy formatu ikony: {e}", log_type="DATA")
+        except Exception as ex:
+            logger.error("ServerIcon", f"Błąd podczas analizy formatu ikony: {ex}", log_type="DATA")
             return None, None, None
 
         # Napraw padding Base64 jeśli potrzeba
@@ -537,8 +540,8 @@ async def process_server_icon(server_data):
             if padding_needed > 0:
                 logger.debug("ServerIcon", f"Dodaję padding Base64: {padding_needed} znaków '='", log_type="DATA")
                 icon_base64 += "=" * padding_needed
-        except Exception as e:
-            logger.error("ServerIcon", f"Błąd podczas naprawiania paddingu Base64: {e}", log_type="DATA")
+        except Exception as ex:
+            logger.error("ServerIcon", f"Błąd podczas naprawiania paddingu Base64: {ex}", log_type="DATA")
             return None, None, None
 
         # Dekoduj Base64 do danych binarnych
@@ -560,12 +563,12 @@ async def process_server_icon(server_data):
                                log_type="DATA")
 
             return server_icon_data, icon_format, icon_hash
-        except Exception as e:
-            logger.error("ServerIcon", f"Błąd podczas dekodowania Base64: {e}", log_type="DATA")
+        except Exception as ex:
+            logger.error("ServerIcon", f"Błąd podczas dekodowania Base64: {ex}", log_type="DATA")
             return None, None, None
 
-    except Exception as e:
-        logger.error("ServerIcon", f"Nieoczekiwany błąd podczas przetwarzania ikony: {e}", log_type="DATA")
+    except Exception as ex:
+        logger.error("ServerIcon", f"Nieoczekiwany błąd podczas przetwarzania ikony: {ex}", log_type="DATA")
         return None, None, None
 
 
@@ -607,16 +610,16 @@ async def recover_saved_icon(server_address):
                                 log_type="DATA")
 
                     return icon_data, format_type, icon_hash
-                except Exception as e:
-                    logger.error("ServerIcon", f"Błąd podczas odczytywania zapisanej ikony {main_icon_path}: {e}",
+                except Exception as ex:
+                    logger.error("ServerIcon", f"Błąd podczas odczytywania zapisanej ikony {main_icon_path}: {ex}",
                                  log_type="DATA")
 
         # Jeśli nie znaleziono ikony dla żadnego formatu
         logger.debug("ServerIcon", f"Nie znaleziono zapisanej ikony dla serwera {server_address}", log_type="DATA")
         return None, None, None
 
-    except Exception as e:
-        logger.error("ServerIcon", f"Nieoczekiwany błąd podczas odzyskiwania ikony: {e}", log_type="DATA")
+    except Exception as ex:
+        logger.error("ServerIcon", f"Nieoczekiwany błąd podczas odzyskiwania ikony: {ex}", log_type="DATA")
         return None, None, None
 
 
@@ -629,7 +632,7 @@ async def save_server_icon(server_icon_data, icon_format, icon_hash, server_addr
 
     Args:
         server_icon_data (bytes): Dane binarne ikony
-        icon_format (str): Format ikony (png, jpeg, itp.)
+        icon_format (str): Format ikony (png, jpeg itp.)
         icon_hash (str): Hash MD5 danych ikony
         server_address (str): Adres serwera (używany w nazwie pliku)
 
@@ -658,7 +661,7 @@ async def save_server_icon(server_icon_data, icon_format, icon_hash, server_addr
         if os.path.exists(hash_icon_path):
             logger.debug("ServerIcon", f"Ikona o tym samym hashu już istnieje: {hash_icon_path}", log_type="DATA")
 
-            # Aktualizuj główną ikonę jeśli się różni
+            # Aktualizuj główną ikonę, jeśli się różni
             if os.path.exists(main_icon_path):
                 try:
                     with open(main_icon_path, "rb") as f:
@@ -672,15 +675,15 @@ async def save_server_icon(server_icon_data, icon_format, icon_hash, server_addr
                         with open(main_icon_path, "wb") as f:
                             f.write(server_icon_data)
                         logger.debug("ServerIcon", "Zaktualizowano główną ikonę serwera", log_type="DATA")
-                except Exception as e:
-                    logger.warning("ServerIcon", f"Błąd podczas aktualizacji głównej ikony: {e}", log_type="DATA")
+                except Exception as ex:
+                    logger.warning("ServerIcon", f"Błąd podczas aktualizacji głównej ikony: {ex}", log_type="DATA")
             else:
                 # Jeśli główna ikona nie istnieje, skopiuj istniejącą z hashem
                 try:
                     shutil.copy2(hash_icon_path, main_icon_path)
                     logger.debug("ServerIcon", "Utworzono główną ikonę serwera", log_type="DATA")
-                except Exception as e:
-                    logger.warning("ServerIcon", f"Błąd podczas kopiowania ikony: {e}", log_type="DATA")
+                except Exception as ex:
+                    logger.warning("ServerIcon", f"Błąd podczas kopiowania ikony: {ex}", log_type="DATA")
 
             return main_icon_path
 
@@ -701,8 +704,8 @@ async def save_server_icon(server_icon_data, icon_format, icon_hash, server_addr
 
             logger.debug("ServerIcon", "Zapisano nową wersję ikony i zaktualizowano główną ikonę", log_type="DATA")
             return main_icon_path
-    except Exception as e:
-        logger.error("ServerIcon", f"Błąd podczas zapisywania ikony: {e}", log_type="DATA")
+    except Exception as ex:
+        logger.error("ServerIcon", f"Błąd podczas zapisywania ikony: {ex}", log_type="DATA")
         return None
 
 
@@ -742,15 +745,16 @@ async def clean_old_icons(icons_dir, server_name_prefix, current_hash, max_keep=
                 try:
                     os.remove(file_path)
                     logger.debug("ServerIcon", f"Usunięto starą ikonę: {file_path}", log_type="DATA")
-                except Exception as e:
-                    logger.warning("ServerIcon", f"Nie udało się usunąć starej ikony {file_path}: {e}", log_type="DATA")
-    except Exception as e:
-        logger.error("ServerIcon", f"Błąd podczas czyszczenia starych ikon: {e}", log_type="DATA")
+                except Exception as ex:
+                    logger.warning("ServerIcon", f"Nie udało się usunąć starej ikony {file_path}: {ex}",
+                                   log_type="DATA")
+    except Exception as ex:
+        logger.error("ServerIcon", f"Błąd podczas czyszczenia starych ikon: {ex}", log_type="DATA")
 
 
 async def attach_server_icon(message, server_icon_data, icon_format):
     """
-    Dołącza ikonę serwera do istniejącej wiadomości Discord lub edytuje wiadomość dodając ikonę.
+    Dołącza ikonę serwera do istniejącej wiadomości Discord lub edytuje wiadomość, dodając ikonę.
 
     Args:
         message (discord.Message): Wiadomość Discord do edycji
@@ -758,7 +762,7 @@ async def attach_server_icon(message, server_icon_data, icon_format):
         icon_format (str): Format ikony
 
     Returns:
-        bool: True jeśli udało się dołączyć ikonę, False w przeciwnym przypadku
+        bool: True, jeśli udało się dołączyć ikonę, False w przeciwnym przypadku
     """
     if not server_icon_data:
         return False
@@ -784,19 +788,19 @@ async def attach_server_icon(message, server_icon_data, icon_format):
             await message.edit(embed=embed, attachments=[icon_file])
             logger.info("ServerIcon", "Pomyślnie dołączono ikonę do wiadomości", log_type="DISCORD")
             return True
-        except discord.HTTPException as e:
+        except discord.HTTPException as ex:
             # Sprawdź, czy błąd dotyczy limitu rozmiaru załącznika
-            if "Request entity too large" in str(e):
+            if "Request entity too large" in str(ex):
                 logger.warning("ServerIcon", "Ikona jest zbyt duża do wysłania jako załącznik", log_type="DISCORD")
             else:
-                logger.error("ServerIcon", f"Błąd HTTP podczas edycji wiadomości z ikoną: {e}", log_type="DISCORD")
+                logger.error("ServerIcon", f"Błąd HTTP podczas edycji wiadomości z ikoną: {ex}", log_type="DISCORD")
             return False
-        except Exception as e:
-            logger.error("ServerIcon", f"Błąd podczas edycji wiadomości z ikoną: {e}", log_type="DISCORD")
+        except Exception as ex:
+            logger.error("ServerIcon", f"Błąd podczas edycji wiadomości z ikoną: {ex}", log_type="DISCORD")
             return False
 
-    except Exception as e:
-        logger.error("ServerIcon", f"Nieoczekiwany błąd podczas dołączania ikony: {e}", log_type="DISCORD")
+    except Exception as ex:
+        logger.error("ServerIcon", f"Nieoczekiwany błąd podczas dołączania ikony: {ex}", log_type="DISCORD")
         return False
 
 
@@ -869,7 +873,7 @@ def create_minecraft_embed(server_data, last_seen_data):
     logger.debug("EmbedCreation", "Rozpoczęcie tworzenia embeda",
                  raw_server_data=server_data)
 
-    # Sprawdź czy wystąpił błąd API
+    # Sprawdź, czy wystąpił błąd API
     if "error" in server_data and "online" not in server_data:
         # Tworzenie embeda z informacją o błędzie
         embed = discord.Embed(
@@ -934,7 +938,7 @@ def create_minecraft_embed(server_data, last_seen_data):
     status = "🟢 ONLINE" if is_online else "🔴 OFFLINE"
     embed.add_field(name="Status", value=status, inline=False)
 
-    # Liczba graczy (niezależnie czy serwer online czy nie)
+    # Liczba graczy (niezależnie czy serwer online, czy nie)
     players_online = server_data.get("players", {}).get("online", 0) if is_online else 0
 
     # Użyj zapamiętanej maksymalnej liczby graczy, jeśli serwer jest offline
@@ -984,7 +988,7 @@ def create_minecraft_embed(server_data, last_seen_data):
         offline_players = []
 
         for player, last_time in last_seen_data.items():
-            if not is_online or player not in player_list:  # Wszyscy gracze gdy serwer offline, albo tylko nieobecni gdy online
+            if not is_online or player not in player_list:  # Wszyscy gracze, gdy serwer offline, albo tylko nieobecni, gdy online
                 last_seen_text += f"{player}: {format_time(last_time)}\n"
                 offline_players.append(f"{player}: {format_time(last_time)}")
 
@@ -1006,7 +1010,7 @@ async def find_and_delete_previous_message():
     ostatnią wysłaną przez niego wiadomość i rozpocząć pracę z nową.
 
     Returns:
-        bool: True jeśli znaleziono i usunięto wiadomość, False w przeciwnym razie
+        bool: True, jeśli znaleziono i usunięto wiadomość, False w przeciwnym razie
     """
     global last_embed_id
 
@@ -1028,11 +1032,16 @@ async def find_and_delete_previous_message():
             except discord.NotFound:
                 logger.warning("Cleanup", f"Nie znaleziono wiadomości o ID {last_embed_id}", log_type="BOT")
                 last_embed_id = None  # Resetujemy, bo wiadomość nie istnieje
-            except Exception as e:
-                logger.error("Cleanup", f"Błąd podczas usuwania wiadomości: {e}", log_type="BOT")
+                return False
+            except Exception as ex:
+                logger.error("Cleanup", f"Błąd podczas usuwania wiadomości: {ex}", log_type="BOT")
                 # Nie resetujemy last_embed_id, może się uda następnym razem
-    except Exception as e:
-        logger.error("Cleanup", f"Ogólny błąd podczas szukania i usuwania wiadomości: {e}", log_type="BOT")
+                return False
+
+        # Jeśli nie ma zapisanego ID wiadomości
+        return False
+    except Exception as ex:
+        logger.error("Cleanup", f"Ogólny błąd podczas szukania i usuwania wiadomości: {ex}", log_type="BOT")
         return False
 
 
@@ -1081,8 +1090,8 @@ async def on_ready():
         else:  # Jeśli nie podano ID serwera, synchronizuj globalnie (może potrwać do godziny)
             await tree.sync()
             logger.info("SlashCommands", "Zsynchronizowano komendy slash globalnie", log_type="BOT")
-    except Exception as e:
-        logger.error("SlashCommands", f"Błąd podczas synchronizacji komend slash: {e}", log_type="BOT")
+    except Exception as ex:
+        logger.error("SlashCommands", f"Błąd podczas synchronizacji komend slash: {ex}", log_type="BOT")
 
 
 @tasks.loop(minutes=5)
@@ -1162,8 +1171,8 @@ async def check_server():
                 logger.warning("Discord", f"Wiadomość o ID {last_embed_id} nie została znaleziona. Wysyłam nową.",
                                log_type="DISCORD")
                 last_embed_id = None
-            except Exception as e:
-                logger.error("Discord", f"Błąd podczas edycji wiadomości: {e}.", log_type="DISCORD")
+            except Exception as ex:
+                logger.error("Discord", f"Błąd podczas edycji wiadomości: {ex}.", log_type="DISCORD")
                 last_embed_id = None
 
         # Jeśli doszliśmy tutaj, musimy wysłać nową wiadomość
@@ -1209,8 +1218,8 @@ async def check_server():
         except Exception as send_error:
             logger.critical("Tasks", f"Nie udało się wysłać nowej wiadomości: {send_error}", log_type="BOT")
 
-    except Exception as e:
-        logger.critical("Tasks", f"Wystąpił błąd w funkcji check_server: {e}", log_type="BOT")
+    except Exception as ex:
+        logger.critical("Tasks", f"Wystąpił błąd w funkcji check_server: {ex}", log_type="BOT")
 
 
 async def check_server_for_command():
@@ -1282,8 +1291,8 @@ async def check_server_for_command():
                 logger.warning("Commands", f"Wiadomość o ID {last_embed_id} nie została znaleziona. Wysyłam nową.",
                                log_type="DISCORD")
                 last_embed_id = None
-            except Exception as e:
-                logger.error("Commands", f"Błąd podczas edycji wiadomości: {e}.", log_type="DISCORD")
+            except Exception as ex:
+                logger.error("Commands", f"Błąd podczas edycji wiadomości: {ex}.", log_type="DISCORD")
                 last_embed_id = None
 
         # Wysyłamy nową wiadomość, jeśli nie udało się edytować istniejącej
@@ -1321,8 +1330,8 @@ async def check_server_for_command():
             logger.error("Commands", f"Nie udało się wysłać nowej wiadomości: {send_error}", log_type="DISCORD")
             return False
 
-    except Exception as e:
-        logger.error("Commands", f"Błąd podczas aktualizacji stanu serwera: {e}", log_type="BOT")
+    except Exception as ex:
+        logger.error("Commands", f"Błąd podczas aktualizacji stanu serwera: {ex}", log_type="BOT")
         return False
 
 
@@ -1335,7 +1344,7 @@ async def update_bot_status(server_data):
     - Idle (Zaraz wracam): Gdy serwer jest online, ale nie ma graczy
     - DND (Nie przeszkadzać): Gdy serwer jest offline
 
-    Dodatkowo, aktywność bota pokazuje liczbę graczy lub informację o stanie serwera.
+    Dodatkowo aktywność bota pokazuje liczbę graczy lub informację o stanie serwera.
 
     Args:
         server_data (dict): Dane o serwerze pobrane z API
@@ -1376,8 +1385,8 @@ async def update_bot_status(server_data):
         # Aktualizuj status bota
         await client.change_presence(status=status, activity=activity)
 
-    except Exception as e:
-        logger.error("BotStatus", f"Błąd podczas aktualizacji statusu bota: {e}", log_type="BOT")
+    except Exception as ex:
+        logger.error("BotStatus", f"Błąd podczas aktualizacji statusu bota: {ex}", log_type="BOT")
 
 
 @tree.command(
@@ -1419,7 +1428,7 @@ async def refresh_minecraft_status(interaction: discord.Interaction):
         # Zapisz czas użycia komendy
         last_command_usage[user_id] = current_time
 
-        # Sprawdź, czy jesteśmy na odpowiednim kanale lub czy użytkownik ma uprawnienia administratora
+        # Sprawdź, czy jesteśmy na odpowiednim kanale lub, czy użytkownik ma uprawnienia administratora
         if interaction.channel_id != CHANNEL_ID and not interaction.user.guild_permissions.administrator:
             channel = client.get_channel(CHANNEL_ID)
             channel_name = channel.name if channel else f"#{CHANNEL_ID}"
@@ -1460,9 +1469,9 @@ async def refresh_minecraft_status(interaction: discord.Interaction):
 
         logger.info("Commands", f"Pomyślnie wykonano komendę /ski dla {user_name}", log_type="BOT")
 
-    except Exception as e:
+    except Exception as ex:
         # Złap wszystkie pozostałe błędy
-        error_msg = str(e)
+        error_msg = str(ex)
         logger.critical("Commands", f"Nieoczekiwany błąd w komendzie /ski: {error_msg}", log_type="BOT")
 
         # Próbuj odpowiedzieć użytkownikowi, jeśli to jeszcze możliwe
