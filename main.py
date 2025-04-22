@@ -253,6 +253,7 @@ async def check_minecraft_server():
                                      motd=motd_text,
                                      version=version_text)
                         data["online"] = False
+                        data["error"] = "Serwer jest offline według MOTD i wersji"
                         logger.server_status(False, data)
                         return data
 
