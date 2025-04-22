@@ -516,63 +516,63 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # NOWY KROK: Przygotowanie paczki instalacyjnej ZIP
+      # Krok 13: Przygotowanie paczki instalacyjnej ZIP
       - name: Create installation package
         id: create_package
         run: |
           # Zainstaluj narzędzie zip
           sudo apt-get update && sudo apt-get install -y zip
-          
+
           # Utwórz nazwę pliku ZIP
           ZIP_FILENAME="mcserverwatchdog-v${{ steps.version.outputs.clean_version }}.zip"
           echo "Tworzenie paczki instalacyjnej: $ZIP_FILENAME"
-          
+
           # Utwórz tymczasowy katalog
           mkdir -p temp_package
-          
+
           # Skopiuj niezbędne pliki
-          cp main.py temp_package/
-          cp pretty_logger.py temp_package/
-          cp version.txt temp_package/
-          cp requirements.txt temp_package/
-          cp .env.example temp_package/.env.example
-          
+          cp main.py temp_package/ || echo "Błąd kopiowania main.py"
+          cp pretty_logger.py temp_package/ || echo "Błąd kopiowania pretty_logger.py"
+          cp version.txt temp_package/ || echo "Błąd kopiowania version.txt"
+          cp requirements.txt temp_package/ || echo "Błąd kopiowania requirements.txt"
+          cp .env.example temp_package/.env.example || echo "Błąd kopiowania .env.example"
+
           # Dodaj README do paczki
-          cat > temp_package/README.txt << EOL
+          cat > temp_package/README.txt << 'EOL'
           MCServerWatchdog v${{ steps.version.outputs.clean_version }}
           ==========================================
-          
+
           Aby uruchomić bota:
-          
+
           1. Upewnij się, że masz zainstalowanego Pythona 3.10 lub nowszego
           2. Zainstaluj wymagane biblioteki: pip install -r requirements.txt
           3. Skopiuj plik .env.example do .env i uzupełnij wszystkie wymagane dane
           4. Uruchom bota: python main.py
-          
+
           Więcej informacji znajdziesz na stronie projektu:
           https://github.com/${{ github.repository }}
           EOL
-          
+
           # Wyświetl zawartość katalogu przed zipowaniem
           echo "Zawartość katalogu temp_package:"
           ls -la temp_package/
-          
+
           # Utwórz archiwum ZIP
           cd temp_package
-          zip -r ../$ZIP_FILENAME *
+          zip -r "../${ZIP_FILENAME}" * || { echo "Błąd podczas tworzenia archiwum ZIP"; exit 1; }
           cd ..
-          
+
           # Sprawdź czy plik ZIP został utworzony
-          if [ -f "$ZIP_FILENAME" ]; then
+          if [ -f "${ZIP_FILENAME}" ]; then
             echo "✅ Paczka instalacyjna została utworzona pomyślnie"
-            ls -lh $ZIP_FILENAME
-            echo "filename=$ZIP_FILENAME" >> $GITHUB_OUTPUT
+            ls -lh "${ZIP_FILENAME}"
+            echo "filename=${ZIP_FILENAME}" >> $GITHUB_OUTPUT
           else
             echo "::error::Nie udało się utworzyć paczki instalacyjnej"
             exit 1
           fi
 
-      # Krok 13: Tworzenie tagu Git dla wersji
+      # Krok 14: Tworzenie tagu Git dla wersji
       - name: Create Git Tag
         run: |
           # Konfiguracja Git
@@ -595,7 +595,7 @@ jobs:
             echo "Tag v$VERSION został utworzony i wysłany do repozytorium"
           fi
 
-      # Krok 14: Tworzenie wydania na GitHubie z dołączonym ZIP
+      # Krok 15: Tworzenie wydania na GitHubie z dołączonym ZIP
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
@@ -610,7 +610,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # Krok 15: Podsumowanie wykonania workflow
+      # Krok 16: Podsumowanie wykonania workflow
       - name: Summary
         run: |
           echo "### 📦 MCServerWatchdog Deployment" >> $GITHUB_STEP_SUMMARY
