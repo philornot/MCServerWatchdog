@@ -87,11 +87,11 @@ jobs:
             local version="$1"
             local type="$2"
             
-            echo "Debug: Inkrementacja wersji $version, typ: $type"
+            echo "Debug: Inkrementacja wersji $version, typ: $type" >&2
             
             # Wyodrębnij bazową wersję (bez hasha)
             version_base="${version%%+*}"
-            echo "Debug: Bazowa wersja (bez hasha): $version_base"
+            echo "Debug: Bazowa wersja (bez hasha): $version_base" >&2
             
             # Sprawdź czy format wersji jest poprawny
             if [[ ! $version_base =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
@@ -106,7 +106,7 @@ jobs:
             # Jeśli patch jest pusty, ustaw go na 0
             patch=${patch:-0}
             
-            echo "Debug: Składowe wersji: major=$major, minor=$minor, patch=$patch"
+            echo "Debug: Składowe wersji: major=$major, minor=$minor, patch=$patch" >&2
             
             # Inkrementuj odpowiednią część wersji według typu wydania
             case "$type" in
