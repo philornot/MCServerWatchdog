@@ -423,7 +423,8 @@ jobs:
           
           # Dodaj informację o prerelease
           if [[ "${{ steps.version.outputs.is_prerelease }}" == "true" ]]; then
-            echo "⚠️ **PRERELEASE**: Ta wersja jest oznaczona jako wydanie wstępne" >> $GITHUB_STEP_SUMMARY
+            PRERELEASE_INFO="\n## ⚠️ Wydanie wstępne (prerelease)\n\nTo jest wydanie wstępne przeznaczone do testów. Może zawierać niestabilne funkcje lub błędy. Nie zaleca się używania w środowisku produkcyjnym.\n"
+            FINAL_CHANGELOG="${PRERELEASE_INFO}${FINAL_CHANGELOG}"
           fi
           
           # Zapisz changelog do pliku
@@ -501,45 +502,44 @@ jobs:
       - name: Create installation package
         id: create_package
         run: |
-          set -e  # Zatrzymaj się przy pierwszym błędzie
+          set -e  # Zatrzymaj na pierwszym błędzie
           
-          # Instalacja narzędzia zip
+          # Zainstaluj narzędzie zip
           echo "Instalacja narzędzia zip..."
-          sudo apt-get update && sudo apt-get install -y zip
+          sudo apt-get update
+          sudo apt-get install -y zip
           
           # Weryfikacja instalacji zip
           echo "Sprawdzanie dostępności narzędzia zip..."
-          which zip
+          zip --version
           
-          # Ustal nazwę pliku ZIP
+          # Utwórz nazwę pliku ZIP
           VERSION="${{ steps.version.outputs.clean_version }}"
           ZIP_FILENAME="mcserverwatchdog-v${VERSION}.zip"
           echo "Tworzenie paczki instalacyjnej: ${ZIP_FILENAME}"
           
-          # Przygotuj katalog tymczasowy
+          # Utwórz katalog tymczasowy
           echo "Przygotowanie katalogu tymczasowego..."
           rm -rf temp_package || true
           mkdir -p temp_package
           
-          # Lista plików do skopiowania
+          # Kopiowanie plików
           echo "Kopiowanie plików do paczki..."
-          
-          # Wymagane pliki - jeśli którykolwiek brakuje, wyświetl ostrzeżenie ale kontynuuj
           for file in main.py pretty_logger.py version.txt requirements.txt; do
             if [ -f "$file" ]; then
               echo "Kopiowanie $file..."
-              cp "$file" temp_package/ || echo "⚠️ Ostrzeżenie: Nie udało się skopiować pliku $file"
+              cp "$file" temp_package/
             else
               echo "⚠️ Ostrzeżenie: Brak pliku $file"
             fi
           done
           
-          # Opcjonalne pliki
+          # Opcjonalny plik .env.example
           if [ -f ".env.example" ]; then
-            cp ".env.example" temp_package/ || echo "⚠️ Ostrzeżenie: Nie udało się skopiować pliku .env.example"
+            cp ".env.example" temp_package/
           fi
           
-          # Tworzenie pliku README
+          # Dodaj plik README
           echo "Tworzenie pliku README.txt..."
           cat > temp_package/README.txt << EOF
           MCServerWatchdog v${VERSION}
@@ -548,7 +548,7 @@ jobs:
           Aby uruchomić bota:
           
           1. Upewnij się, że masz zainstalowanego Pythona 3.10 lub nowszego
-          2. Zainstaluj wymagane biblioteki: pip install -r requirements.txt 
+          2. Zainstaluj wymagane biblioteki: pip install -r requirements.txt
           3. Skopiuj plik .env.example do .env i uzupełnij wszystkie wymagane dane
           4. Uruchom bota: python main.py
           
@@ -556,33 +556,29 @@ jobs:
           https://github.com/${{ github.repository }}
           EOF
           
-          # Sprawdzenie zawartości katalogu
+          # Wyświetl zawartość katalogu
           echo "Zawartość katalogu temp_package:"
           ls -la temp_package/
           
-          # Sprawdzenie czy katalog nie jest pusty
-          if [ -z "$(ls -A temp_package/)" ]; then
-            echo "::error::Katalog temp_package jest pusty, nie można utworzyć paczki"
-            exit 1
-          fi
-          
-          # Tworzenie archiwum ZIP
+          # Utwórz archiwum ZIP
           echo "Tworzenie archiwum ZIP..."
-          (cd temp_package && zip -r "../${ZIP_FILENAME}" *)
+          cd temp_package
+          zip -r "../${ZIP_FILENAME}" *
+          cd ..
           
-          # Sprawdzenie czy plik ZIP został utworzony poprawnie
+          # Sprawdź czy plik ZIP istnieje
           if [ -f "${ZIP_FILENAME}" ]; then
             echo "✅ Paczka instalacyjna została utworzona pomyślnie: ${ZIP_FILENAME}"
             ls -lh "${ZIP_FILENAME}"
             echo "filename=${ZIP_FILENAME}" >> $GITHUB_OUTPUT
           else
-            echo "::error::Nie udało się utworzyć paczki instalacyjnej"
+            echo "❌ Nie udało się utworzyć paczki instalacyjnej"
             exit 1
           fi
 
       # Krok 14: Tworzenie tagu Git dla wersji
       - name: Create Git Tag
-        if: success() # Wykonuj, tylko jeśli poprzednie kroki się powiodły
+        if: success()  # Wykonuj, tylko jeśli poprzednie kroki się powiodły
         run: |
           # Konfiguracja Git
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
@@ -622,10 +618,11 @@ jobs:
 
       # Krok 16: Podsumowanie wykonania workflow
       - name: Summary
-        if: always()
+        if: always()  # Zawsze wykonuj ten krok, nawet jeśli inne kroki zawiodły
         run: |
           echo "### 📦 MCServerWatchdog Deployment" >> $GITHUB_STEP_SUMMARY
           
+          # Informacja o statusie
           if [[ "${{ job.status }}" == "success" ]]; then
             echo "✅ **Status**: Sukces" >> $GITHUB_STEP_SUMMARY
             echo "✅ **Wersja**: v${{ steps.version.outputs.clean_version }}" >> $GITHUB_STEP_SUMMARY
@@ -640,8 +637,6 @@ jobs:
             
             if [[ -n "${{ steps.create_package.outputs.filename }}" ]]; then
               echo "📥 **Paczka instalacyjna**: ${{ steps.create_package.outputs.filename }}" >> $GITHUB_STEP_SUMMARY
-            else
-              echo "❌ **Paczka instalacyjna**: Nie utworzono" >> $GITHUB_STEP_SUMMARY
             fi
             
             # Dodaj informację o lintowaniu
@@ -656,4 +651,10 @@ jobs:
           else
             echo "❌ **Status**: Niepowodzenie" >> $GITHUB_STEP_SUMMARY
             echo "❌ **Przyczyna**: Proces CI/CD nie zakończył się pomyślnie" >> $GITHUB_STEP_SUMMARY
+            
+            # Jeśli version.txt został zmieniony, ale proces się nie powiódł
+            if [[ "${{ steps.commit.outputs.committed }}" == "true" ]]; then
+              echo "⚠️ **Uwaga**: version.txt został zaktualizowany mimo błędu." >> $GITHUB_STEP_SUMMARY
+              echo "ℹ️ Nie anulowano zmian w version.txt ponieważ mogłoby to spowodować konflikty." >> $GITHUB_STEP_SUMMARY
+            fi
           fi
