@@ -86,28 +86,28 @@ jobs:
           increment_version() {
             local version="$1"
             local type="$2"
-            
+          
             echo "Debug: Inkrementacja wersji $version, typ: $type" >&2
-            
+          
             # Wyodrębnij bazową wersję (bez hasha)
             version_base="${version%%+*}"
             echo "Debug: Bazowa wersja (bez hasha): $version_base" >&2
-            
+          
             # Sprawdź czy format wersji jest poprawny
             if [[ ! $version_base =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
               echo "::warning::Niepoprawny format wersji '$version_base'. Ustawiam domyślną wersję 1.0.0" >&2
               version_base="1.0.0"
             fi
-            
+          
             # Rozdziel wersję na składowe (major.minor.patch)
             local IFS='.'
             read -r major minor patch <<< "$version_base"
-            
+          
             # Jeśli patch jest pusty, ustaw go na 0
             patch=${patch:-0}
-            
+          
             echo "Debug: Składowe wersji: major=$major, minor=$minor, patch=$patch" >&2
-            
+          
             # Inkrementuj odpowiednią część wersji według typu wydania
             case "$type" in
               major)
@@ -127,7 +127,7 @@ jobs:
                 patch=$((patch + 1))
                 ;;
             esac
-            
+          
             # Zwróć nową wersję
             echo "$major.$minor.$patch"
           }
@@ -147,15 +147,15 @@ jobs:
           if [ -f "version.txt" ]; then
             VERSION=$(cat version.txt | tr -d '[:space:]')
             echo "Debug: Odczytana wersja z pliku: '$VERSION'"
-            
+          
             # Dodatkowa walidacja formatu wersji w pliku
             if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\+[a-zA-Z0-9]+)?$ ]]; then
               echo "::warning::Nieprawidłowy format wersji w version.txt: '$VERSION', resetuję do 1.0.0"
               VERSION="1.0.0"
             fi
-            
+          
             echo "Aktualna wersja: $VERSION"
-            
+          
             # Inkrementuj wersję bazową tylko jeśli plik istnieje
             BASE_VERSION=$(increment_version "$VERSION" "$RELEASE_TYPE")
             echo "Bazowa wersja po inkrementacji: $BASE_VERSION"
@@ -220,10 +220,10 @@ jobs:
           
             # Próba push z obsługą konfliktów
             echo "Próba push zmian do gałęzi $BRANCH_NAME..."
-            
+          
             # Najpierw pobierz najnowsze zmiany z remote, zachowując lokalny commit
             git fetch origin $BRANCH_NAME
-            
+          
             # Opcja 1: Próba rebase (preferowana, zachowuje historię liniową)
             if git rebase origin/$BRANCH_NAME; then
               echo "Rebase zakończony pomyślnie, wykonuję push..."
@@ -232,7 +232,7 @@ jobs:
               # Opcja 2: Anuluj rebase i spróbuj merge
               git rebase --abort
               echo "Rebase nie powiódł się, próbuję merge..."
-              
+          
               if git pull --no-rebase origin $BRANCH_NAME && git push origin HEAD:${BRANCH_NAME}; then
                 echo "Merge i push zakończone pomyślnie"
               else
@@ -300,12 +300,12 @@ jobs:
             FINAL_CHANGELOG="Brak zmian od ostatniego wydania."
           else
             echo "Znaleziono commity, przetwarzam..."
-            
+          
             # Przygotuj kategorie jako zwykłe tablice zamiast asocjacyjnych (dla kompatybilności)
             CATEGORY_TYPES=("fix" "feat" "docs" "style" "refactor" "perf" "test" "build" "ci" "chore")
             CATEGORY_NAMES=("Poprawki błędów" "Nowe funkcje" "Dokumentacja" "Formatowanie kodu" "Refaktoryzacja" "Optymalizacja" "Testy" "Build" "CI/CD" "Porządki")
             CATEGORY_EMOJIS=("🐛" "✨" "📚" "💎" "♻️" "🚀" "🧪" "🔧" "🤖" "🧹")
-            
+          
             # Inicjalizacja zmiennych dla kategorii
             fix_commits=""
             feat_commits=""
@@ -318,26 +318,26 @@ jobs:
             ci_commits=""
             chore_commits=""
             other_commits=""
-            
+          
             # Przetwarzanie commitów - zapisujemy najpierw do pliku tymczasowego
             echo "$COMMIT_LIST" > /tmp/commits.txt
-            
+          
             # Przetwarzanie linii po linii z zabezpieczeniem
             while IFS= read -r line; do
               if [ -z "$line" ]; then
                 continue
               fi
-              
+          
               # Parsowanie linii na hash, autora i wiadomość (z obsługą błędów)
               hash=$(echo "$line" | cut -d'|' -f1 || echo "")
               author=$(echo "$line" | cut -d'|' -f3 || echo "Unknown")
               message=$(echo "$line" | cut -d'|' -f5- || echo "")
-              
+          
               if [ -z "$hash" ] || [ -z "$message" ]; then
                 echo "Debug: Pomijam nieprawidłowy format: $line"
                 continue
               fi
-              
+          
               # Uproszczone określanie typu commita
               commit_type="other"
               for type in "${CATEGORY_TYPES[@]}"; do
@@ -346,16 +346,16 @@ jobs:
                   break
                 fi
               done
-              
+          
               # Oczyszczenie wiadomości commita (uproszczone)
               clean_message=$(echo "$message" | sed 's/^.*://' | sed 's/^\s*//')
               if [ -z "$clean_message" ]; then
                 clean_message="$message"
               fi
-              
+          
               # Formatowanie wpisu
               formatted_entry="* ${clean_message} [${hash}](https://github.com/${{ github.repository }}/commit/${hash})"
-              
+          
               # Przypisanie do odpowiedniej kategorii
               case "$commit_type" in
                 "fix") fix_commits="${fix_commits}${formatted_entry}\n" ;;
@@ -371,16 +371,16 @@ jobs:
                 *) other_commits="${other_commits}${formatted_entry}\n" ;;
               esac
             done < /tmp/commits.txt
-            
+          
             # Przygotowanie changeloga
             FINAL_CHANGELOG=""
-            
+          
             # Dodawanie sekcji dla każdej kategorii
             for i in "${!CATEGORY_TYPES[@]}"; do
               type="${CATEGORY_TYPES[$i]}"
               name="${CATEGORY_NAMES[$i]}"
               emoji="${CATEGORY_EMOJIS[$i]}"
-              
+          
               # Pobierz zawartość odpowiedniej zmiennej
               case "$type" in
                 "fix") commits="$fix_commits" ;;
@@ -395,23 +395,26 @@ jobs:
                 "chore") commits="$chore_commits" ;;
                 *) commits="" ;;
               esac
-              
+          
               # Dodaj sekcję jeśli są jakieś commity
               if [ -n "$commits" ]; then
                 FINAL_CHANGELOG="${FINAL_CHANGELOG}### ${emoji} ${name}\n${commits}\n"
               fi
             done
-            
+          
             # Dodaj inne zmiany
             if [ -n "$other_commits" ]; then
               FINAL_CHANGELOG="${FINAL_CHANGELOG}### 🔄 Inne zmiany\n${other_commits}\n"
             fi
-            
+          
             # Jeśli nie ma zmian, dodaj informację
             if [ -z "$FINAL_CHANGELOG" ]; then
               FINAL_CHANGELOG="Brak zmian od ostatniego wydania."
             fi
           fi
+          
+          # Dodaj informację o paczce instalacyjnej ZIP
+          INSTALL_INFO="\n## 📥 Instalacja/Aktualizacja\n\nDla ułatwienia instalacji/aktualizacji, dołączono paczkę instalacyjną `mcserverwatchdog-v${{ steps.version.outputs.clean_version }}.zip`, która zawiera wszystkie niezbędne pliki do uruchomienia bota (main.py, pretty_logger.py, version.txt).\n\n**Jak zaktualizować bota na serwerze:**\n\n1. Pobierz plik ZIP z tej strony\n2. Rozpakuj pliki do katalogu bota na serwerze (nadpisując istniejące pliki)\n3. Upewnij się, że plik .env jest skonfigurowany poprawnie\n4. Uruchom ponownie bota\n\nPlik .env nie jest dołączony do paczki i musisz go skonfigurować samodzielnie.\n"
           
           # Zapisz changelog do pliku
           echo "# 📦 MCServerWatchdog v${{ steps.version.outputs.clean_version }}" > changelog.md
@@ -420,6 +423,7 @@ jobs:
           echo "" >> changelog.md
           echo -e "## 📋 Lista zmian\n" >> changelog.md
           echo -e "$FINAL_CHANGELOG" >> changelog.md
+          echo -e "$INSTALL_INFO" >> changelog.md
           echo "## 📊 Statystyki" >> changelog.md
           echo "- Wersja: ${{ steps.version.outputs.clean_version }}" >> changelog.md
           
@@ -427,7 +431,7 @@ jobs:
           if [ -n "$COMMIT_LIST" ]; then
             COMMIT_COUNT=$(echo "$COMMIT_LIST" | wc -l)
             echo "- Liczba commitów: $COMMIT_COUNT" >> changelog.md
-            
+          
             # Uproszczona obsługa autorów
             REPO_OWNER="${{ github.repository_owner }}"
             echo "- Autorzy: $REPO_OWNER" >> changelog.md
@@ -483,6 +487,55 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # NOWY KROK: Przygotowanie paczki instalacyjnej ZIP
+      - name: Create installation package
+        id: create_package
+        run: |
+          # Utwórz nazwę pliku ZIP
+          ZIP_FILENAME="mcserverwatchdog-v${{ steps.version.outputs.clean_version }}.zip"
+          echo "Tworzenie paczki instalacyjnej: $ZIP_FILENAME"
+          
+          # Utwórz tymczasowy katalog
+          mkdir -p temp_package
+          
+          # Skopiuj niezbędne pliki
+          cp main.py temp_package/
+          cp pretty_logger.py temp_package/
+          cp version.txt temp_package/
+          cp requirements.txt temp_package/
+          cp .env.example temp_package/.env.example
+          
+          # Dodaj README do paczki
+          cat > temp_package/README.txt << EOL
+          MCServerWatchdog v${{ steps.version.outputs.clean_version }}
+          ==========================================
+          
+          Aby uruchomić bota:
+          
+          1. Upewnij się, że masz zainstalowanego Pythona 3.10 lub nowszego
+          2. Zainstaluj wymagane biblioteki: pip install -r requirements.txt
+          3. Skopiuj plik .env.example do .env i uzupełnij wszystkie wymagane dane
+          4. Uruchom bota: python main.py
+          
+          Więcej informacji znajdziesz na stronie projektu:
+          https://github.com/${{ github.repository }}
+          EOL
+          
+          # Utwórz archiwum ZIP
+          cd temp_package
+          zip -r ../$ZIP_FILENAME *
+          cd ..
+          
+          # Sprawdź czy plik ZIP został utworzony
+          if [ -f "$ZIP_FILENAME" ]; then
+            echo "✅ Paczka instalacyjna została utworzona pomyślnie"
+            ls -lh $ZIP_FILENAME
+            echo "filename=$ZIP_FILENAME" >> $GITHUB_OUTPUT
+          else
+            echo "::error::Nie udało się utworzyć paczki instalacyjnej"
+            exit 1
+          fi
+
       # Krok 13: Tworzenie tagu Git dla wersji
       - name: Create Git Tag
         run: |
@@ -500,13 +553,13 @@ jobs:
           else
             # Utwórz tag lokalnie
             git tag -a "v$VERSION" -m "Version $VERSION"
-            
+          
             # Wypchnij tag do repozytorium
             git push origin "v$VERSION"
             echo "Tag v$VERSION został utworzony i wysłany do repozytorium"
           fi
 
-      # Krok 14: Tworzenie wydania na GitHubie
+      # Krok 14: Tworzenie wydania na GitHubie z dołączonym ZIP
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
@@ -516,6 +569,8 @@ jobs:
           draft: false
           prerelease: false
           generate_release_notes: false
+          files: |
+            ${{ steps.create_package.outputs.filename }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -526,6 +581,7 @@ jobs:
           echo "✅ **Wersja**: v${{ steps.version.outputs.clean_version }}" >> $GITHUB_STEP_SUMMARY
           echo "🏷️ **Docker tag**: ghcr.io/${{ github.repository_owner }}/mcserverwatchdog:${{ steps.docker_tags.outputs.version }}" >> $GITHUB_STEP_SUMMARY
           echo "📅 **Data wydania**: $(date +'%d.%m.%Y %H:%M:%S')" >> $GITHUB_STEP_SUMMARY
+          echo "📥 **Paczka instalacyjna**: ${{ steps.create_package.outputs.filename }}" >> $GITHUB_STEP_SUMMARY
           
           # Dodaj informację o lintowaniu
           if [[ "${{ steps.lint.outputs.has_errors }}" == "true" ]]; then
