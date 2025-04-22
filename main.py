@@ -467,7 +467,8 @@ async def process_server_icon(server_data):
     Przetwarza ikonę serwera Minecraft z danych API.
 
     Funkcja szczegółowo analizuje dane ikony, wykonuje niezbędne konwersje i weryfikacje,
-    a następnie zwraca przygotowany obiekt ikony lub None w przypadku problemów.
+    a następnie zwraca przygotowany obiekt ikony.
+    Gdy serwer jest offline, próbuje odzyskać ostatnio zapisaną ikonę.
 
     Args:
         server_data (dict): Dane serwera zawierające potencjalnie pole 'icon'
@@ -478,8 +479,10 @@ async def process_server_icon(server_data):
     try:
         # Sprawdź, czy serwer jest online i czy ma ikonę
         if not server_data.get("online", False):
-            logger.debug("ServerIcon", "Serwer jest offline, pomijam przetwarzanie ikony", log_type="DATA")
-            return None, None, None
+            logger.debug("ServerIcon", "Serwer jest offline, próbuję odzyskać ostatnio zapisaną ikonę", log_type="DATA")
+
+            # Spróbuj odzyskać ostatnio zapisaną ikonę
+            return await recover_saved_icon(MC_SERVER_ADDRESS)
 
         if "icon" not in server_data:
             logger.debug("ServerIcon", "Brak ikony w danych serwera", log_type="DATA")
@@ -563,6 +566,57 @@ async def process_server_icon(server_data):
 
     except Exception as e:
         logger.error("ServerIcon", f"Nieoczekiwany błąd podczas przetwarzania ikony: {e}", log_type="DATA")
+        return None, None, None
+
+
+async def recover_saved_icon(server_address):
+    """
+    Próbuje odzyskać ostatnio zapisaną ikonę serwera z lokalnego systemu plików.
+
+    Args:
+        server_address (str): Adres serwera do identyfikacji ikony
+
+    Returns:
+        tuple: (bytes, str, str) - Dane binarne ikony, jej format i hash lub (None, None, None) w przypadku błędu
+    """
+    try:
+        # Utwórz bezpieczną nazwę pliku na podstawie adresu serwera
+        safe_server_name = "".join(c if c.isalnum() else "_" for c in server_address)
+        icon_dir = SERVER_ICONS_DIR
+
+        # Sprawdź, czy katalog z ikonami istnieje
+        if not os.path.exists(icon_dir):
+            logger.debug("ServerIcon", f"Katalog ikon {icon_dir} nie istnieje", log_type="DATA")
+            return None, None, None
+
+        # Sprawdź, czy istnieje główna ikona dla tego serwera
+        # Sprawdzamy najpopularniejsze formaty
+        for format_type in ["png", "jpg", "jpeg", "gif"]:
+            main_icon_path = os.path.join(icon_dir, f"{safe_server_name}_current.{format_type}")
+            if os.path.exists(main_icon_path):
+                try:
+                    # Odczytaj dane ikony
+                    with open(main_icon_path, "rb") as f:
+                        icon_data = f.read()
+
+                    # Oblicz hash dla ikony
+                    icon_hash = hashlib.md5(icon_data).hexdigest()
+
+                    logger.info("ServerIcon",
+                                f"Odzyskano zapisaną ikonę dla offline serwera (format: {format_type}, hash: {icon_hash})",
+                                log_type="DATA")
+
+                    return icon_data, format_type, icon_hash
+                except Exception as e:
+                    logger.error("ServerIcon", f"Błąd podczas odczytywania zapisanej ikony {main_icon_path}: {e}",
+                                 log_type="DATA")
+
+        # Jeśli nie znaleziono ikony dla żadnego formatu
+        logger.debug("ServerIcon", f"Nie znaleziono zapisanej ikony dla serwera {server_address}", log_type="DATA")
+        return None, None, None
+
+    except Exception as e:
+        logger.error("ServerIcon", f"Nieoczekiwany błąd podczas odzyskiwania ikony: {e}", log_type="DATA")
         return None, None, None
 
 
@@ -1035,11 +1089,6 @@ async def on_ready():
 async def check_server():
     """
     Zadanie cyklicznie sprawdzające stan serwera i aktualizujące informacje.
-
-    Ta funkcja jest wywoływana co 5 minut. Pobiera aktualny stan serwera,
-    aktualizuje informacje o graczach, edytuje istniejący embed zamiast
-    tworzenia nowych wiadomości i aktualizuje status bota Discord.
-    Inteligentnie zarządza ikonami serwera, unikając duplikatów.
     """
     global last_embed_id
 
@@ -1063,6 +1112,7 @@ async def check_server():
             await update_last_seen(player_list)
 
         # Przetwórz ikonę serwera (jeśli jest dostępna)
+        # POPRAWKA: Dodajemy trzeci parametr (icon_hash)
         server_icon_data, icon_format, icon_hash = await process_server_icon(server_data)
         has_valid_icon = server_icon_data is not None
 
@@ -1189,7 +1239,8 @@ async def check_server_for_command():
             await update_last_seen(player_list)
 
         # Przetwórz ikonę serwera (jeśli jest dostępna)
-        server_icon_data, icon_format = await process_server_icon(server_data)
+        # POPRAWKA: Dodajemy trzeci parametr (icon_hash)
+        server_icon_data, icon_format, icon_hash = await process_server_icon(server_data)
         has_valid_icon = server_icon_data is not None
 
         if has_valid_icon:
@@ -1275,42 +1326,6 @@ async def check_server_for_command():
         return False
 
 
-@tree.command(
-    name="status",
-    description="Wymusza aktualizację statusu bota na podstawie stanu serwera"
-)
-async def update_status_command(interaction: discord.Interaction):
-    """
-    Komenda slash do ręcznego wymuszenia aktualizacji statusu bota.
-
-    Pozwala administratorom na natychmiastową aktualizację statusu bota bez
-    czekania na automatyczne sprawdzenie co 5 minut.
-
-    Args:
-        interaction (discord.Interaction): Obiekt interakcji z Discord
-    """
-    logger.info("Commands", f"Użytkownik {interaction.user.name} użył komendy /status", log_type="BOT")
-
-    # Odpowiedz na interakcję, by uniknąć timeoutu
-    await interaction.response.defer(thinking=True)
-
-    # Pobierz status serwera
-    server_data = await check_minecraft_server()
-
-    # Aktualizuj status bota
-    await update_bot_status(server_data)
-
-    # Odpowiedz użytkownikowi
-    status_text = "online" if server_data.get("online", False) else "offline"
-    player_count = server_data.get("players", {}).get("online", 0) if server_data.get("online", False) else 0
-
-    await interaction.followup.send(
-        f"Status bota został zaktualizowany! Serwer jest {status_text} z {player_count} graczami.",
-        ephemeral=True
-    )
-    logger.info("Commands", "Wykonano ręczną aktualizację statusu", log_type="BOT")
-
-
 async def update_bot_status(server_data):
     """
     Aktualizuje status bota Discord w zależności od stanu serwera Minecraft.
@@ -1367,16 +1382,14 @@ async def update_bot_status(server_data):
 
 @tree.command(
     name="ski",
-    description="Sprawdza aktualny stan serwera Minecraft i aktualizuje informacje"
+    description="Aktualizuje informacje o stanie serwera Minecraft"
 )
-async def mc_server_command(interaction: discord.Interaction):
+async def refresh_minecraft_status(interaction: discord.Interaction):
     """
-    Ulepszona komenda slash do ręcznego sprawdzenia stanu serwera.
+    Komenda slash do natychmiastowej aktualizacji informacji o serwerze.
 
-    Pozwala użytkownikom na ręczne wywołanie sprawdzenia stanu serwera
-    bez czekania na automatyczne odświeżenie co 5 minut. Zawiera obszerną
-    obsługę błędów i zapobiega nadużyciom poprzez ograniczenie częstotliwości
-    użycia.
+    Aktualizuje embeda i status bota na podstawie aktualnego stanu serwera,
+    wysyłając zapytanie do API mcsv.
 
     Args:
         interaction (discord.Interaction): Obiekt interakcji z Discord
@@ -1416,61 +1429,36 @@ async def mc_server_command(interaction: discord.Interaction):
                            log_type="BOT")
 
             await interaction.response.send_message(
-                f"⚠️ Ta komenda działa tylko na kanale <#{CHANNEL_ID}> ({channel_name}).\n"
-                f"Możesz tam przejść i użyć komendy ponownie.",
+                f"⚠️ Ta komenda działa tylko na kanale <#{CHANNEL_ID}> ({channel_name}).",
                 ephemeral=True
             )
             return
 
         # Odpowiedz na interakcję, by uniknąć timeoutu
-        await interaction.response.defer(thinking=True)
+        await interaction.response.defer(ephemeral=True)
 
-        # Pobierz stan serwera bezpośrednio (nie wywołuj check_server, który aktualizuje embed)
-        try:
-            server_data = await check_minecraft_server()
+        # Pobierz status serwera
+        server_data = await check_minecraft_server()
 
-            # Sformatuj odpowiedź w zależności od stanu serwera
-            if server_data.get("online", False):
-                player_count = server_data.get("players", {}).get("online", 0)
-                max_players = server_data.get("players", {}).get("max", 0)
-                player_list = server_data.get("players", {}).get("list", [])
+        # Aktualizuj status bota
+        await update_bot_status(server_data)
 
-                # Formatowanie listy graczy
-                players_text = ""
-                if player_count > 0 and player_list:
-                    players_text = "\n**Gracze online:**\n"
-                    for i, player in enumerate(player_list, 1):
-                        players_text += f"{i}. {player}\n"
+        # Aktualizuj informacje o ostatnio widzianych graczach
+        if server_data.get("online", False):
+            player_list = server_data.get("players", {}).get("list", [])
+            await update_last_seen(player_list)
 
-                # Odpowiedź dla serwera online
-                response = (
-                    f"✅ **Serwer jest ONLINE!**\n"
-                    f"👥 Gracze: {player_count}/{max_players}{players_text}"
-                    f"Status został zaktualizowany na kanale <#{CHANNEL_ID}>."
-                )
-            else:
-                # Odpowiedź dla serwera offline
-                response = (
-                    f"❌ **Serwer jest OFFLINE!**\n\n"
-                    f"Status został zaktualizowany na kanale <#{CHANNEL_ID}>."
-                )
+        # Zaktualizuj lub wyślij nową wiadomość embed
+        success = await check_server_for_command()
 
-            # Teraz wywołaj check_server() aby zaktualizować embed na kanale
-            await check_server_for_command()
+        # Odpowiedz użytkownikowi
+        if success:
+            await interaction.followup.send("✅ Informacje o serwerze zostały zaktualizowane.", ephemeral=True)
+        else:
+            await interaction.followup.send("⚠️ Wystąpił problem podczas aktualizacji informacji o serwerze.",
+                                            ephemeral=True)
 
-            # Odpowiedz użytkownikowi
-            await interaction.followup.send(response, ephemeral=True)
-            logger.info("Commands", f"Pomyślnie wykonano komendę /ski dla {user_name}", log_type="BOT")
-
-        except Exception as e:
-            error_msg = str(e)
-            logger.error("Commands", f"Błąd podczas sprawdzania serwera: {error_msg}", log_type="BOT")
-            await interaction.followup.send(
-                f"⚠️ **Wystąpił błąd podczas sprawdzania stanu serwera**\n"
-                f"Błąd: ```{error_msg}```\n"
-                f"Spróbuj ponownie później lub skontaktuj się z administratorem.",
-                ephemeral=True
-            )
+        logger.info("Commands", f"Pomyślnie wykonano komendę /ski dla {user_name}", log_type="BOT")
 
     except Exception as e:
         # Złap wszystkie pozostałe błędy
@@ -1481,16 +1469,12 @@ async def mc_server_command(interaction: discord.Interaction):
         try:
             if not interaction.response.is_done():
                 await interaction.response.send_message(
-                    f"⚠️ **Wystąpił nieoczekiwany błąd**\n"
-                    f"```{error_msg}```\n"
-                    f"Zgłoś ten problem administratorowi bota.",
+                    f"⚠️ Wystąpił nieoczekiwany błąd podczas aktualizacji informacji o serwerze.",
                     ephemeral=True
                 )
             else:
                 await interaction.followup.send(
-                    f"⚠️ **Wystąpił nieoczekiwany błąd**\n"
-                    f"```{error_msg}```\n"
-                    f"Zgłoś ten problem administratorowi bota.",
+                    f"⚠️ Wystąpił nieoczekiwany błąd podczas aktualizacji informacji o serwerze.",
                     ephemeral=True
                 )
         except Exception as follow_up_error:
