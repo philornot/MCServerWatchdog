@@ -28,18 +28,18 @@ gdzie `<typ>` to jeden z typów zdefiniowanych poniżej, a `<opis>` to krótki o
 
 ### Typy commitów
 
-| Typ | Kategoria | Opis | Emoji |
-|-----|-----------|------|-------|
-| `fix` | Poprawki błędów | Naprawa błędu w kodzie | 🐛 |
-| `feat` | Nowe funkcje | Dodanie nowej funkcjonalności | ✨ |
-| `docs` | Dokumentacja | Zmiany w dokumentacji | 📚 |
-| `style` | Formatowanie kodu | Zmiany formatowania, białych znaków, itp. (bez zmian w logice) | 💎 |
-| `refactor` | Refaktoryzacja | Przebudowa kodu bez zmiany funkcjonalności | ♻️ |
-| `perf` | Optymalizacja | Zmiany zwiększające wydajność | 🚀 |
-| `test` | Testy | Dodanie lub modyfikacja testów | 🧪 |
-| `build` | Build | Zmiany w systemie budowania, zależnościach | 🔧 |
-| `ci` | CI/CD | Zmiany w konfiguracji CI/CD | 🤖 |
-| `chore` | Porządki | Rutynowe zadania, porządkowanie kodu | 🧹 |
+| Typ        | Kategoria         | Opis                                                           | Emoji |
+|------------|-------------------|----------------------------------------------------------------|-------|
+| `fix`      | Poprawki błędów   | Naprawa błędu w kodzie                                         | 🐛    |
+| `feat`     | Nowe funkcje      | Dodanie nowej funkcjonalności                                  | ✨     |
+| `docs`     | Dokumentacja      | Zmiany w dokumentacji                                          | 📚    |
+| `style`    | Formatowanie kodu | Zmiany formatowania, białych znaków, itp. (bez zmian w logice) | 💎    |
+| `refactor` | Refaktoryzacja    | Przebudowa kodu bez zmiany funkcjonalności                     | ♻️    |
+| `perf`     | Optymalizacja     | Zmiany zwiększające wydajność                                  | 🚀    |
+| `test`     | Testy             | Dodanie lub modyfikacja testów                                 | 🧪    |
+| `build`    | Build             | Zmiany w systemie budowania, zależnościach                     | 🔧    |
+| `ci`       | CI/CD             | Zmiany w konfiguracji CI/CD                                    | 🤖    |
+| `chore`    | Porządki          | Rutynowe zadania, porządkowanie kodu                           | 🧹    |
 
 (CI/CD - Continuous Integration/Continuous Deployment, m. in. GitHub Actions)
 ### Przykłady
