@@ -16,9 +16,10 @@ on:
         default: 'patch'
         type: choice
         options:
-          - patch   # Drobne poprawki (zwiększa 0.0.X)
-          - minor   # Nowe funkcje (zwiększa 0.X.0)
-          - major   # Zmiany łamiące kompatybilność (zwiększa X.0.0)
+          - prerelease  # Wydanie testowe (dodaje tylko hash, bez inkrementacji)
+          - patch       # Drobne poprawki (zwiększa 0.0.X)
+          - minor       # Nowe funkcje (zwiększa 0.X.0)
+          - major       # Zmiany łamiące kompatybilność (zwiększa X.0.0)
 
 # Definicja zadań
 jobs:
@@ -86,28 +87,28 @@ jobs:
           increment_version() {
             local version="$1"
             local type="$2"
-          
+            
             echo "Debug: Inkrementacja wersji $version, typ: $type" >&2
-          
+            
             # Wyodrębnij bazową wersję (bez hasha)
             version_base="${version%%+*}"
             echo "Debug: Bazowa wersja (bez hasha): $version_base" >&2
-          
+            
             # Sprawdź czy format wersji jest poprawny
             if [[ ! $version_base =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
               echo "::warning::Niepoprawny format wersji '$version_base'. Ustawiam domyślną wersję 1.0.0" >&2
               version_base="1.0.0"
             fi
-          
+            
             # Rozdziel wersję na składowe (major.minor.patch)
             local IFS='.'
             read -r major minor patch <<< "$version_base"
-          
+            
             # Jeśli patch jest pusty, ustaw go na 0
             patch=${patch:-0}
-          
+            
             echo "Debug: Składowe wersji: major=$major, minor=$minor, patch=$patch" >&2
-          
+            
             # Inkrementuj odpowiednią część wersji według typu wydania
             case "$type" in
               major)
@@ -122,12 +123,15 @@ jobs:
               patch)
                 patch=$((patch + 1))
                 ;;
+              prerelease)
+                # Dla wydania prerelease nie inkrementujemy numerów
+                ;;
               *)
                 echo "::warning::Nieznany typ wydania '$type'. Używam 'patch'" >&2
                 patch=$((patch + 1))
                 ;;
             esac
-          
+            
             # Zwróć nową wersję
             echo "$major.$minor.$patch"
           }
@@ -138,7 +142,7 @@ jobs:
           echo "Typ wydania: $RELEASE_TYPE"
           
           # Walidacja typu wydania
-          if [[ ! "$RELEASE_TYPE" =~ ^(patch|minor|major)$ ]]; then
+          if [[ ! "$RELEASE_TYPE" =~ ^(prerelease|patch|minor|major)$ ]]; then
             echo "::warning::Nieprawidłowy typ wydania '$RELEASE_TYPE'. Używam domyślnego 'patch'."
             RELEASE_TYPE="patch"
           fi
@@ -147,15 +151,15 @@ jobs:
           if [ -f "version.txt" ]; then
             VERSION=$(cat version.txt | tr -d '[:space:]')
             echo "Debug: Odczytana wersja z pliku: '$VERSION'"
-          
+            
             # Dodatkowa walidacja formatu wersji w pliku
             if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\+[a-zA-Z0-9]+)?$ ]]; then
               echo "::warning::Nieprawidłowy format wersji w version.txt: '$VERSION', resetuję do 1.0.0"
               VERSION="1.0.0"
             fi
-          
+            
             echo "Aktualna wersja: $VERSION"
-          
+            
             # Inkrementuj wersję bazową tylko jeśli plik istnieje
             BASE_VERSION=$(increment_version "$VERSION" "$RELEASE_TYPE")
             echo "Bazowa wersja po inkrementacji: $BASE_VERSION"
@@ -165,11 +169,11 @@ jobs:
             echo "Nie znaleziono pliku version.txt, używam wersji początkowej: $BASE_VERSION"
           fi
           
-          # Dla wydania typu patch dodaj hash commita
-          if [[ "$RELEASE_TYPE" == "patch" ]]; then
-            SHORT_HASH=$(get_short_hash)
+          # Tylko dla wydania prerelease dodaj hash commita
+          SHORT_HASH=$(get_short_hash)
+          if [[ "$RELEASE_TYPE" == "prerelease" ]]; then
             NEW_VERSION="${BASE_VERSION}+${SHORT_HASH}"
-            echo "Dodano hash commita: $SHORT_HASH"
+            echo "Dodano hash commita dla prerelease: $SHORT_HASH"
           else
             NEW_VERSION="$BASE_VERSION"
           fi
@@ -192,9 +196,10 @@ jobs:
           echo "Debug: Zapisana wersja w pliku:"
           cat version.txt
           
-          # Ustaw zmienną wyjściową dla kolejnych kroków
+          # Ustaw zmienne wyjściowe dla kolejnych kroków
           echo "clean_version=$NEW_VERSION" >> $GITHUB_OUTPUT
-          echo "Wygenerowana wersja: $NEW_VERSION"
+          echo "is_prerelease=$([[ "$RELEASE_TYPE" == "prerelease" ]] && echo "true" || echo "false")" >> $GITHUB_OUTPUT
+          echo "Wygenerowana wersja: $NEW_VERSION (prerelease: $([[ "$RELEASE_TYPE" == "prerelease" ]] && echo "tak" || echo "nie"))"
 
       # Krok 7: Commitowanie zmian w pliku version.txt (z obsługą konfliktów)
       - name: Commit version file
@@ -220,10 +225,10 @@ jobs:
           
             # Próba push z obsługą konfliktów
             echo "Próba push zmian do gałęzi $BRANCH_NAME..."
-          
+            
             # Najpierw pobierz najnowsze zmiany z remote, zachowując lokalny commit
             git fetch origin $BRANCH_NAME
-          
+            
             # Opcja 1: Próba rebase (preferowana, zachowuje historię liniową)
             if git rebase origin/$BRANCH_NAME; then
               echo "Rebase zakończony pomyślnie, wykonuję push..."
@@ -232,7 +237,7 @@ jobs:
               # Opcja 2: Anuluj rebase i spróbuj merge
               git rebase --abort
               echo "Rebase nie powiódł się, próbuję merge..."
-          
+              
               if git pull --no-rebase origin $BRANCH_NAME && git push origin HEAD:${BRANCH_NAME}; then
                 echo "Merge i push zakończone pomyślnie"
               else
@@ -300,12 +305,12 @@ jobs:
             FINAL_CHANGELOG="Brak zmian od ostatniego wydania."
           else
             echo "Znaleziono commity, przetwarzam..."
-          
+            
             # Przygotuj kategorie jako zwykłe tablice zamiast asocjacyjnych (dla kompatybilności)
             CATEGORY_TYPES=("fix" "feat" "docs" "style" "refactor" "perf" "test" "build" "ci" "chore")
             CATEGORY_NAMES=("Poprawki błędów" "Nowe funkcje" "Dokumentacja" "Formatowanie kodu" "Refaktoryzacja" "Optymalizacja" "Testy" "Build" "CI/CD" "Porządki")
             CATEGORY_EMOJIS=("🐛" "✨" "📚" "💎" "♻️" "🚀" "🧪" "🔧" "🤖" "🧹")
-          
+            
             # Inicjalizacja zmiennych dla kategorii
             fix_commits=""
             feat_commits=""
@@ -318,26 +323,26 @@ jobs:
             ci_commits=""
             chore_commits=""
             other_commits=""
-          
+            
             # Przetwarzanie commitów - zapisujemy najpierw do pliku tymczasowego
             echo "$COMMIT_LIST" > /tmp/commits.txt
-          
+            
             # Przetwarzanie linii po linii z zabezpieczeniem
             while IFS= read -r line; do
               if [ -z "$line" ]; then
                 continue
               fi
-          
+              
               # Parsowanie linii na hash, autora i wiadomość (z obsługą błędów)
               hash=$(echo "$line" | cut -d'|' -f1 || echo "")
               author=$(echo "$line" | cut -d'|' -f3 || echo "Unknown")
               message=$(echo "$line" | cut -d'|' -f5- || echo "")
-          
+              
               if [ -z "$hash" ] || [ -z "$message" ]; then
                 echo "Debug: Pomijam nieprawidłowy format: $line"
                 continue
               fi
-          
+              
               # Uproszczone określanie typu commita
               commit_type="other"
               for type in "${CATEGORY_TYPES[@]}"; do
@@ -346,16 +351,16 @@ jobs:
                   break
                 fi
               done
-          
+              
               # Oczyszczenie wiadomości commita (uproszczone)
               clean_message=$(echo "$message" | sed 's/^.*://' | sed 's/^\s*//')
               if [ -z "$clean_message" ]; then
                 clean_message="$message"
               fi
-          
+              
               # Formatowanie wpisu
               formatted_entry="* ${clean_message} [${hash}](https://github.com/${{ github.repository }}/commit/${hash})"
-          
+              
               # Przypisanie do odpowiedniej kategorii
               case "$commit_type" in
                 "fix") fix_commits="${fix_commits}${formatted_entry}\n" ;;
@@ -371,16 +376,16 @@ jobs:
                 *) other_commits="${other_commits}${formatted_entry}\n" ;;
               esac
             done < /tmp/commits.txt
-          
+            
             # Przygotowanie changeloga
             FINAL_CHANGELOG=""
-          
+            
             # Dodawanie sekcji dla każdej kategorii
             for i in "${!CATEGORY_TYPES[@]}"; do
               type="${CATEGORY_TYPES[$i]}"
               name="${CATEGORY_NAMES[$i]}"
               emoji="${CATEGORY_EMOJIS[$i]}"
-          
+              
               # Pobierz zawartość odpowiedniej zmiennej
               case "$type" in
                 "fix") commits="$fix_commits" ;;
@@ -395,18 +400,18 @@ jobs:
                 "chore") commits="$chore_commits" ;;
                 *) commits="" ;;
               esac
-          
+              
               # Dodaj sekcję jeśli są jakieś commity
               if [ -n "$commits" ]; then
                 FINAL_CHANGELOG="${FINAL_CHANGELOG}### ${emoji} ${name}\n${commits}\n"
               fi
             done
-          
+            
             # Dodaj inne zmiany
             if [ -n "$other_commits" ]; then
               FINAL_CHANGELOG="${FINAL_CHANGELOG}### 🔄 Inne zmiany\n${other_commits}\n"
             fi
-          
+            
             # Jeśli nie ma zmian, dodaj informację
             if [ -z "$FINAL_CHANGELOG" ]; then
               FINAL_CHANGELOG="Brak zmian od ostatniego wydania."
@@ -415,6 +420,28 @@ jobs:
           
           # Dodaj informację o paczce instalacyjnej ZIP
           INSTALL_INFO="\n## 📥 Instalacja/Aktualizacja\n\nDla ułatwienia instalacji/aktualizacji, dołączono paczkę instalacyjną `mcserverwatchdog-v${{ steps.version.outputs.clean_version }}.zip`, która zawiera wszystkie niezbędne pliki do uruchomienia bota (main.py, pretty_logger.py, version.txt).\n\n**Jak zaktualizować bota na serwerze:**\n\n1. Pobierz plik ZIP z tej strony\n2. Rozpakuj pliki do katalogu bota na serwerze (nadpisując istniejące pliki)\n3. Upewnij się, że plik .env jest skonfigurowany poprawnie\n4. Uruchom ponownie bota\n\nPlik .env nie jest dołączony do paczki i musisz go skonfigurować samodzielnie.\n"
+          
+          # Dodaj informację o prerelease
+          if [[ "${{ steps.version.outputs.is_prerelease }}" == "true" ]]; then
+            echo "⚠️ **PRERELEASE**: Ta wersja jest oznaczona jako wydanie wstępne" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "🏷️ **Docker tag**: ghcr.io/${{ github.repository_owner }}/mcserverwatchdog:${{ steps.docker_tags.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "📅 **Data wydania**: $(date +'%d.%m.%Y %H:%M:%S')" >> $GITHUB_STEP_SUMMARY
+          echo "📥 **Paczka instalacyjna**: ${{ steps.create_package.outputs.filename }}" >> $GITHUB_STEP_SUMMARY
+          
+          # Dodaj informację o lintowaniu
+          if [[ "${{ steps.lint.outputs.has_errors }}" == "true" ]]; then
+            echo "⚠️ **Ostrzeżenie**: Wykryto problemy w kodzie podczas lintowania" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "✅ **Linting**: Kod przeszedł wszystkie testy" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # Dodaj link do wydania
+          echo "🔗 **Link do wydania**: [v${{ steps.version.outputs.clean_version }}](https://github.com/${{ github.repository }}/releases/tag/v${{ steps.version.outputs.clean_version }})" >> $GITHUB_STEP_SUMMARY "true" ]]; then
+            PRERELEASE_INFO="\n## ⚠️ Wydanie wstępne (prerelease)\n\nTo jest wydanie wstępne przeznaczone do testów. Może zawierać niestabilne funkcje lub błędy. Nie zaleca się używania w środowisku produkcyjnym.\n"
+            FINAL_CHANGELOG="${PRERELEASE_INFO}${FINAL_CHANGELOG}"
+          fi
           
           # Zapisz changelog do pliku
           echo "# 📦 MCServerWatchdog v${{ steps.version.outputs.clean_version }}" > changelog.md
@@ -431,7 +458,7 @@ jobs:
           if [ -n "$COMMIT_LIST" ]; then
             COMMIT_COUNT=$(echo "$COMMIT_LIST" | wc -l)
             echo "- Liczba commitów: $COMMIT_COUNT" >> changelog.md
-          
+            
             # Uproszczona obsługa autorów
             REPO_OWNER="${{ github.repository_owner }}"
             echo "- Autorzy: $REPO_OWNER" >> changelog.md
@@ -491,6 +518,9 @@ jobs:
       - name: Create installation package
         id: create_package
         run: |
+          # Zainstaluj narzędzie zip
+          sudo apt-get update && sudo apt-get install -y zip
+          
           # Utwórz nazwę pliku ZIP
           ZIP_FILENAME="mcserverwatchdog-v${{ steps.version.outputs.clean_version }}.zip"
           echo "Tworzenie paczki instalacyjnej: $ZIP_FILENAME"
@@ -520,6 +550,10 @@ jobs:
           Więcej informacji znajdziesz na stronie projektu:
           https://github.com/${{ github.repository }}
           EOL
+          
+          # Wyświetl zawartość katalogu przed zipowaniem
+          echo "Zawartość katalogu temp_package:"
+          ls -la temp_package/
           
           # Utwórz archiwum ZIP
           cd temp_package
@@ -553,7 +587,7 @@ jobs:
           else
             # Utwórz tag lokalnie
             git tag -a "v$VERSION" -m "Version $VERSION"
-          
+            
             # Wypchnij tag do repozytorium
             git push origin "v$VERSION"
             echo "Tag v$VERSION został utworzony i wysłany do repozytorium"
@@ -567,7 +601,7 @@ jobs:
           name: Release v${{ steps.version.outputs.clean_version }}
           body: "${{ steps.changelog.outputs.CHANGELOG }}"
           draft: false
-          prerelease: false
+          prerelease: ${{ steps.version.outputs.is_prerelease }}
           generate_release_notes: false
           files: |
             ${{ steps.create_package.outputs.filename }}
@@ -579,16 +613,6 @@ jobs:
         run: |
           echo "### 📦 MCServerWatchdog Deployment" >> $GITHUB_STEP_SUMMARY
           echo "✅ **Wersja**: v${{ steps.version.outputs.clean_version }}" >> $GITHUB_STEP_SUMMARY
-          echo "🏷️ **Docker tag**: ghcr.io/${{ github.repository_owner }}/mcserverwatchdog:${{ steps.docker_tags.outputs.version }}" >> $GITHUB_STEP_SUMMARY
-          echo "📅 **Data wydania**: $(date +'%d.%m.%Y %H:%M:%S')" >> $GITHUB_STEP_SUMMARY
-          echo "📥 **Paczka instalacyjna**: ${{ steps.create_package.outputs.filename }}" >> $GITHUB_STEP_SUMMARY
           
-          # Dodaj informację o lintowaniu
-          if [[ "${{ steps.lint.outputs.has_errors }}" == "true" ]]; then
-            echo "⚠️ **Ostrzeżenie**: Wykryto problemy w kodzie podczas lintowania" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "✅ **Linting**: Kod przeszedł wszystkie testy" >> $GITHUB_STEP_SUMMARY
-          fi
-          
-          # Dodaj link do wydania
-          echo "🔗 **Link do wydania**: [v${{ steps.version.outputs.clean_version }}](https://github.com/${{ github.repository }}/releases/tag/v${{ steps.version.outputs.clean_version }})" >> $GITHUB_STEP_SUMMARY
+          # Dodaj informację o prerelease
+          if [[ "${{ steps.version.outputs.is_prerelease }}" ==
