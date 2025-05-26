@@ -3,3 +3,5 @@ aiohttp
 pytz
 python-dotenv
 colorama
+structlog
+rich
