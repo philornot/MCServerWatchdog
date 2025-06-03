@@ -5,7 +5,7 @@ import io
 import os
 import pickle
 import shutil
-import asyncio
+
 import aiohttp
 import discord
 import pytz
@@ -192,7 +192,18 @@ async def check_minecraft_server():
     """
     Sprawdza status serwera Minecraft i zwraca dane w formie słownika.
 
-    Ulepszona obsługa serwerów Aternos, które zawsze zwracają online: true
+    Funkcja łączy się z API mcsrvstat.us, aby pobrać informacje o stanie serwera.
+    Implementuje zaawansowane metody analizy stanu serwera, uwzględniając:
+    - Dane z API (status online, MOTD, wersja, liczba graczy)
+    - Historyczne dane o aktywności graczy
+    — Błędy zwracane przez API
+    — Czas od ostatniej znanej aktywności
+
+    Zapewnia stabilną i wiarygodną detekcję stanu serwera, nawet jeśli API
+    zwraca niepełne lub niespójne dane.
+
+    Returns:
+        dict: Słownik zawierający przetworzone informacje o serwerze i jego statusie
     """
     global max_players, last_known_online_time, last_seen
 
@@ -202,106 +213,199 @@ async def check_minecraft_server():
     try:
         logger.debug("ServerCheck", f"Sprawdzanie stanu serwera {MC_SERVER_ADDRESS}:{MC_SERVER_PORT}", log_type="API")
 
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+        async with aiohttp.ClientSession() as session:
             async with session.get(api_url) as response:
                 if response.status == 200:
                     data = await response.json()
                     logger.api_request(api_url, response=data, status=response.status)
 
-                    # ===== SPECJALNA OBSŁUGA DLA SERWERÓW ATERNOS =====
-                    # Serwery Aternos zawsze zwracają online: true, musimy sprawdzić MOTD i wersję
+                    # ===== FAZA 1: Zbieranie danych z API =====
 
-                    # Sprawdź wersję
-                    version = data.get("version", "")
-                    if "offline" in str(version).lower() or "⚫" in str(version) or "●" in str(version):
-                        logger.info("ServerCheck", "Serwer Aternos jest OFFLINE (wykryto po wersji)", log_type="API")
+                    # Podstawowy status z API
+                    reported_online = data.get("online", False)
+
+                    # Sprawdź, czy API zwróciło błąd
+                    api_has_error = False
+                    if "debug" in data and "error" in data["debug"]:
+                        api_has_error = True
+                        logger.debug("ServerCheck", "API zwróciło błąd w polu debug",
+                                     error=data["debug"]["error"], log_type="API")
+
+                    # Pobierz dane o graczach
+                    players_data = data.get("players", {})
+                    online_player_count = players_data.get("online", 0)
+                    player_list = players_data.get("list", [])
+
+                    # Zapisz maksymalną liczbę graczy
+                    if "max" in players_data and players_data["max"] > 0:
+                        max_players = players_data["max"]
+                        logger.debug("ServerCheck", f"Zaktualizowano maksymalną liczbę graczy: {max_players}",
+                                     log_type="DATA")
+
+                    # ===== FAZA 2: Analiza MOTD i wersji =====
+
+                    # Sprawdź MOTD pod kątem słów kluczowych "offline"
+                    motd_indicates_offline = False
+                    if "motd" in data and "clean" in data["motd"] and data["motd"]["clean"]:
+                        motd_text = " ".join(data["motd"]["clean"]).lower()
+                        offline_keywords = ["offline", "wyłączony", "niedostępny", "unavailable", "maintenance"]
+                        motd_indicates_offline = any(keyword in motd_text for keyword in offline_keywords)
+
+                        if motd_indicates_offline:
+                            logger.debug("ServerCheck", f"MOTD wskazuje na stan offline: '{motd_text}'",
+                                         log_type="API")
+
+                    # Sprawdź wersję pod kątem słów kluczowych "offline"
+                    version_indicates_offline = False
+                    if "version" in data and data["version"]:
+                        version_text = str(data["version"]).lower()
+                        version_indicates_offline = "offline" in version_text or "⚫" in version_text
+
+                        if version_indicates_offline:
+                            logger.debug("ServerCheck", f"Wersja wskazuje na stan offline: '{version_text}'",
+                                         log_type="API")
+
+                    # ===== FAZA 3: Decyzja o stanie serwera =====
+
+                    # PRIORYTET 1: Jeśli zarówno MOTD, jak i wersja wskazują offline — serwer jest offline
+                    if motd_indicates_offline and version_indicates_offline:
+                        logger.info("ServerCheck",
+                                    "Serwer jest OFFLINE według MOTD i wersji",
+                                    log_type="API")
                         data["online"] = False
-                        data["aternos_offline"] = True
+                        data["error"] = "Serwer jest offline według MOTD i wersji"
                         logger.server_status(False, data)
                         return data
 
-                    # Sprawdź MOTD
-                    motd_clean = []
-                    if "motd" in data and "clean" in data["motd"]:
-                        motd_clean = data["motd"]["clean"]
-                        motd_text = " ".join(motd_clean).lower()
-
-                        if "this server is offline" in motd_text or "ten serwer jest offline" in motd_text:
-                            logger.info("ServerCheck", "Serwer Aternos jest OFFLINE (wykryto po MOTD)", log_type="API")
+                    # PRIORYTET 2: Jeśli API zgłasza błąd — nie możemy określić stanu
+                    if api_has_error and not reported_online:
+                        # Sprawdź ostatnią aktywność
+                        if last_known_online_time:
+                            time_since_online = (current_time - last_known_online_time).total_seconds() / 60
+                            if time_since_online < 10:  # Ostatnio online w ciągu 10 minut
+                                logger.debug("ServerCheck",
+                                             "API zgłasza błąd, ale serwer był niedawno online - zakładam ONLINE",
+                                             log_type="API")
+                                data["online"] = True
+                            else:
+                                logger.debug("ServerCheck",
+                                             "API zgłasza błąd i serwer dawno nie był online - zakładam OFFLINE",
+                                             log_type="API")
+                                data["online"] = False
+                        else:
                             data["online"] = False
-                            data["aternos_offline"] = True
-                            logger.server_status(False, data)
-                            return data
 
-                    # ===== STANDARDOWA LOGIKA DLA INNYCH SERWERÓW =====
+                        logger.server_status(data["online"], data)
+                        return data
 
-                    # Jeśli dotarliśmy tutaj i online jest true, sprawdź graczy
-                    if data.get("online", False):
-                        players_data = data.get("players", {})
-                        online_player_count = players_data.get("online", 0)
-                        player_list = players_data.get("list", [])
-
-                        # Zapisz maksymalną liczbę graczy
-                        if "max" in players_data and players_data["max"] > 0:
-                            max_players = players_data["max"]
-                            logger.debug("ServerCheck", f"Zaktualizowano maksymalną liczbę graczy: {max_players}",
-                                         log_type="DATA")
+                    # PRIORYTET 3: Jeśli API mówi, że online i są gracze — serwer jest online
+                    if reported_online and (online_player_count > 0 or len(player_list) > 0):
+                        logger.info("ServerCheck",
+                                    f"Serwer jest ONLINE z {online_player_count} graczami",
+                                    log_type="API")
+                        data["online"] = True
 
                         # Aktualizuj czas ostatniej aktywności
-                        if online_player_count > 0 or player_list:
-                            last_known_online_time = current_time
+                        last_known_online_time = current_time
+
+                        # Aktualizuj ostatnio widzianych graczy
+                        if player_list:
                             await update_last_seen(player_list)
 
-                        logger.info("ServerCheck", f"Serwer jest ONLINE z {online_player_count} graczami",
-                                    log_type="API")
                         logger.server_status(True, data)
                         return data
-                    else:
-                        logger.info("ServerCheck", "Serwer jest OFFLINE", log_type="API")
-                        logger.server_status(False, data)
+
+                    # PRIORYTET 4: Jeśli API mówi, że online, ale brak graczy
+                    if reported_online and online_player_count == 0:
+                        # Sprawdź, czy ktoś był niedawno
+                        recent_players = []
+                        for player, last_time in last_seen.items():
+                            if (current_time - last_time).total_seconds() / 60 < 5:
+                                recent_players.append(player)
+
+                        if recent_players:
+                            logger.debug("ServerCheck",
+                                         f"API zgłasza brak graczy, ale {len(recent_players)} było niedawno - serwer ONLINE",
+                                         log_type="API")
+                            data["online"] = True
+                            data["players"]["list"] = recent_players
+                            data["players"]["online"] = len(recent_players)
+                        else:
+                            logger.info("ServerCheck",
+                                        "Serwer jest ONLINE ale pusty",
+                                        log_type="API")
+                            data["online"] = True
+
+                        # Aktualizuj czas ostatniej aktywności
+                        last_known_online_time = current_time
+                        logger.server_status(data["online"], data)
                         return data
+
+                    # PRIORYTET 5: Jeśli API mówi, że offline
+                    if not reported_online:
+                        # Najpierw sprawdź, czy nie było niedawnej aktywności
+                        if last_known_online_time:
+                            time_since_online = (current_time - last_known_online_time).total_seconds() / 60
+
+                            if time_since_online < 2:  # Mniej niż 2 minuty temu był online
+                                logger.warning("ServerCheck",
+                                               f"API zgłasza offline, ale serwer był online {time_since_online:.1f} min temu - możliwy fałszywy alarm",
+                                               log_type="API")
+                                # Daj serwerowi szansę — może to chwilowy problem
+                                data["online"] = True
+                                data["api_error"] = "Możliwy fałszywy alarm - serwer był niedawno online"
+                            else:
+                                logger.info("ServerCheck", "Serwer jest OFFLINE", log_type="API")
+                                data["online"] = False
+                        else:
+                            data["online"] = False
+
+                        logger.server_status(data["online"], data)
+                        return data
+
+                    # Domyślnie zwróć dane z API
+                    logger.server_status(data.get("online", False), data)
+                    return data
 
                 else:
                     # Obsługa błędów HTTP
-                    error_msg = f"Błąd API: HTTP {response.status}"
+                    error_msg = f"Błąd API: {response.status}"
                     if response.status == 429:
-                        error_msg = "Zbyt wiele zapytań do API (429). Spróbuj za chwilę."
+                        error_msg = "Zbyt wiele zapytań do API (kod 429). Proszę spróbować ponownie za chwilę."
                     elif response.status == 404:
-                        error_msg = "Serwer nie znaleziony (404). Sprawdź adres."
+                        error_msg = "Serwer nie został znaleziony przez API (kod 404). Sprawdź adres i port."
                     elif response.status >= 500:
-                        error_msg = f"Błąd serwera API ({response.status})"
+                        error_msg = f"Błąd serwera API (kod {response.status}). Spróbuj ponownie później."
 
                     logger.api_request(api_url, status=response.status, error=error_msg)
-                    return {"online": False, "error": error_msg, "http_error": True}
 
-    except asyncio.TimeoutError:
-        error_msg = "Timeout połączenia z API (10s)"
-        logger.api_request(api_url, error=error_msg)
+                    # Jeśli był niedawno online, zwróć dane z cache
+                    if last_known_online_time and (current_time - last_known_online_time).total_seconds() / 60 < 10:
+                        active_players = [p for p, t in last_seen.items()
+                                          if (current_time - t).total_seconds() / 60 < 5]
 
-        # Sprawdź cache dla timeout
-        if last_known_online_time and (current_time - last_known_online_time).total_seconds() / 60 < 10:
-            active_players = [p for p, t in last_seen.items()
-                              if (current_time - t).total_seconds() / 60 < 5]
+                        logger.debug("ServerCheck",
+                                     "Błąd API, używam danych z cache - serwer prawdopodobnie ONLINE",
+                                     log_type="API")
 
-            logger.debug("ServerCheck", "Timeout API, używam cache - zakładam ONLINE", log_type="API")
-            return {
-                "online": True,
-                "api_timeout": True,
-                "players": {
-                    "online": len(active_players),
-                    "max": max_players,
-                    "list": active_players
-                },
-                "hostname": MC_SERVER_ADDRESS
-            }
+                        return {
+                            "online": True,
+                            "api_error": error_msg,
+                            "players": {
+                                "online": len(active_players),
+                                "max": max_players,
+                                "list": active_players
+                            },
+                            "hostname": MC_SERVER_ADDRESS
+                        }
 
-        return {"online": False, "error": error_msg, "timeout_error": True}
+                    return {"online": False, "error": error_msg}
 
     except Exception as ex:
-        error_msg = f"Wyjątek: {type(ex).__name__}: {str(ex)}"
+        error_msg = f"Wyjątek: {str(ex)}"
         logger.api_request(api_url, error=error_msg)
 
-        # Dla innych wyjątków też sprawdź cache
+        # Sprawdź cache w przypadku wyjątku
         if last_known_online_time and (current_time - last_known_online_time).total_seconds() / 60 < 10:
             active_players = [p for p, t in last_seen.items()
                               if (current_time - t).total_seconds() / 60 < 5]
@@ -317,7 +421,7 @@ async def check_minecraft_server():
                 "hostname": MC_SERVER_ADDRESS
             }
 
-        return {"online": False, "error": error_msg, "exception_error": True}
+        return {"online": False, "error": error_msg}
 
 
 async def process_server_icon(server_data):
@@ -743,14 +847,25 @@ def create_minecraft_embed(server_data, last_seen_data):
     """
     Tworzy embed z informacjami o serwerze Minecraft.
 
-    Ulepszona obsługa błędów i serwerów Aternos.
+    Funkcja generuje pięknie sformatowany embed Discord zawierający
+    informacje o statusie serwera, liczbie graczy, liście graczy online
+    oraz graczy, którzy byli ostatnio widziani.
+
+    Args:
+        server_data (dict): Dane o serwerze pobrane z API
+        last_seen_data (dict): Słownik z informacjami o ostatnio widzianych graczach
+
+    Returns:
+        discord.Embed: Gotowy embed do wysłania na kanał Discord
     """
     current_time = get_warsaw_time()
 
-    logger.debug("EmbedCreation", "Rozpoczęcie tworzenia embeda", raw_server_data=server_data)
+    # Dodane logowanie dla debugowania danych serwera
+    logger.debug("EmbedCreation", "Rozpoczęcie tworzenia embeda",
+                 raw_server_data=server_data)
 
     # Sprawdź, czy wystąpił błąd API
-    if "error" in server_data:
+    if "error" in server_data and "online" not in server_data:
         # Tworzenie embeda z informacją o błędzie
         embed = discord.Embed(
             title=f"Status serwera Minecraft: {MC_SERVER_ADDRESS}",
@@ -758,81 +873,50 @@ def create_minecraft_embed(server_data, last_seen_data):
             timestamp=current_time
         )
 
-        # Określ typ błędu i odpowiednią ikonę
+        # Dodaj informację o błędzie
         error_msg = server_data.get("error", "Nieznany błąd")
-        if "timeout_error" in server_data:
-            error_icon = "⏱️"
-            error_title = "Timeout połączenia"
-        elif "http_error" in server_data:
-            error_icon = "🌐"
-            error_title = "Błąd HTTP"
-        elif "exception_error" in server_data:
-            error_icon = "⚠️"
-            error_title = "Błąd aplikacji"
-        else:
-            error_icon = "❓"
-            error_title = "Błąd"
+        embed.add_field(name="⚠️ Błąd API", value=f"```{error_msg}```", inline=False)
+        embed.add_field(name="Status", value="Nieznany (błąd API)", inline=False)
 
-        embed.add_field(
-            name=f"{error_icon} {error_title}",
-            value=f"```{error_msg}```",
-            inline=False
-        )
-
-        # Jeśli mamy dane z cache (api_timeout lub exception z cache)
-        if server_data.get("online", False) and "players" in server_data:
-            embed.add_field(name="Status", value="🟡 Prawdopodobnie ONLINE (dane z cache)", inline=False)
-            players_data = server_data.get("players", {})
-            embed.add_field(
-                name="Gracze (cache)",
-                value=f"{players_data.get('online', 0)}/{players_data.get('max', max_players)}",
-                inline=True
-            )
-        else:
-            embed.add_field(name="Status", value="❓ Nieznany (błąd API)", inline=False)
-
-        # Dodaj ostatnio widzianych graczy
+        # Dodaj ostatnio widzianych graczy, jeśli są dostępni
         if last_seen_data:
             last_seen_text = ""
-            for player, last_time in list(last_seen_data.items())[:5]:  # Pokaż max 5 graczy
+            offline_players = []
+
+            for player, last_time in last_seen_data.items():
                 last_seen_text += f"{player}: {format_time(last_time)}\n"
+                offline_players.append(f"{player}: {format_time(last_time)}")
 
             if last_seen_text:
-                if len(last_seen_data) > 5:
-                    last_seen_text += f"... i {len(last_seen_data) - 5} więcej"
                 embed.add_field(name="Ostatnio widziani:", value=f"```{last_seen_text}```", inline=False)
+                logger.debug("Embed", "Dodano listę ostatnio widzianych graczy", offline_players=offline_players)
 
+        # Dodaj informację o wersji bota
         embed.set_footer(text=f"Bot v{BOT_VERSION}")
+
         return embed
 
-    # ===== STANDARDOWA OBSŁUGA DLA POPRAWNEJ ODPOWIEDZI =====
-
-    # Sprawdź status serwera
+    # Standardowy kod dla poprawnej odpowiedzi
+    # Sprawdź rzeczywisty status serwera
     is_online = server_data.get("online", False)
-    is_aternos_offline = server_data.get("aternos_offline", False)
 
-    # Pobierz dane o graczach
-    player_list = []
-    players_online = 0
-    players_max = max_players  # Domyślnie użyj zapamiętanej wartości
-
-    if "players" in server_data:
-        players_data = server_data.get("players", {})
-        players_online = players_data.get("online", 0)
-        players_max = players_data.get("max", max_players)
-        player_list = players_data.get("list", [])
+    # Dodane dodatkowe logowanie dla graczy
+    player_list = server_data.get("players", {}).get("list", []) if is_online else []
+    logger.debug("EmbedCreation", f"Lista graczy z API: {player_list}",
+                 player_count=len(player_list),
+                 player_data=server_data.get("players", {}))
 
     # Ustawienie koloru embeda
     if is_online:
-        if players_online > 0:
-            color = discord.Color.green()
-            logger.debug("Embed", "Zielony embed - serwer online z graczami")
+        if player_list:
+            color = discord.Color.green()  # Serwer online z graczami
+            logger.debug("Embed", "Tworzenie zielonego embeda (serwer online z graczami)")
         else:
-            color = discord.Color.gold()
-            logger.debug("Embed", "Złoty embed - serwer online bez graczy")
+            color = discord.Color.gold()  # Serwer online bez graczy
+            logger.debug("Embed", "Tworzenie złotego embeda (serwer online bez graczy)")
     else:
-        color = discord.Color.red()
-        logger.debug("Embed", "Czerwony embed - serwer offline")
+        color = discord.Color.red()  # Serwer offline
+        logger.debug("Embed", "Tworzenie czerwonego embeda (serwer offline)")
 
     # Tworzenie embeda
     embed = discord.Embed(
@@ -842,62 +926,66 @@ def create_minecraft_embed(server_data, last_seen_data):
     )
 
     # Status serwera
-    if is_online:
-        status = "🟢 ONLINE"
-    elif is_aternos_offline:
-        status = "🔴 OFFLINE (Aternos)"
-    else:
-        status = "🔴 OFFLINE"
-
+    status = "🟢 ONLINE" if is_online else "🔴 OFFLINE"
     embed.add_field(name="Status", value=status, inline=False)
 
-    # Dodaj wersję serwera jeśli jest dostępna i serwer online
-    if is_online and "version" in server_data and server_data["version"]:
-        version = server_data["version"]
-        # Nie pokazuj wersji jeśli zawiera symbole offline
-        if not any(x in str(version) for x in ["●", "⚫", "offline", "Offline"]):
-            embed.add_field(name="Wersja", value=version, inline=True)
+    # Liczba graczy (niezależnie czy serwer online, czy nie)
+    players_online = server_data.get("players", {}).get("online", 0) if is_online else 0
 
-    # Liczba graczy
+    # Użyj zapamiętanej maksymalnej liczby graczy, jeśli serwer jest offline
+    if is_online:
+        players_max = server_data.get("players", {}).get("max", max_players)
+    else:
+        players_max = max_players
+
     embed.add_field(name="Gracze", value=f"{players_online}/{players_max}", inline=True)
 
-    # Lista graczy online
+    # Lista graczy
     if is_online and player_list:
+        # Dodajmy numerację graczy dla lepszej czytelności
         players_value = ""
-        for idx, player in enumerate(player_list[:10], 1):  # Max 10 graczy
+        for idx, player in enumerate(player_list, 1):
             players_value += f"{idx}. {player}\n"
 
-        if len(player_list) > 10:
-            players_value += f"... i {len(player_list) - 10} więcej"
+        # Dodajmy informację o liczbie graczy w nazwie pola
+        player_count = len(player_list)
+        field_name = f"Lista graczy online ({player_count})"
 
-        field_name = f"Lista graczy online ({len(player_list)})"
-        embed.add_field(name=field_name, value=f"```{players_value}```", inline=False)
-    elif is_online:
+        # Sprawdźmy długość listy graczy — Discord ma limity na pola embed
+        if len(players_value) > 900:  # Bezpieczny limit dla wartości pola embed
+            # Jeśli lista jest zbyt długa, podzielmy ją
+            first_part = ""
+            for idx, player in enumerate(player_list[:5], 1):  # Pokaż tylko pierwszych 5
+                first_part += f"{idx}. {player}\n"
+
+            embed.add_field(name=field_name, value=f"```{first_part}... i {player_count - 5} więcej```", inline=False)
+            logger.debug("Embed", f"Lista graczy jest zbyt długa, pokazuję tylko 5 pierwszych z {player_count}",
+                         players=player_list)
+        else:
+            # Standardowo pokazujemy wszystkich graczy
+            embed.add_field(name=field_name, value=f"```{players_value}```", inline=False)
+            logger.debug("Embed", f"Dodano {player_count} graczy do listy", players=player_list)
+
+        # Dodajmy dodatkowe logowanie dla każdego gracza
+        for player in player_list:
+            logger.debug("EmbedPlayer", f"Dodawanie gracza do embeda: {player}")
+    else:
         embed.add_field(name="Lista graczy online", value="Brak graczy online", inline=False)
+        logger.debug("Embed", "Brak graczy online")
 
-    # Ostatnio widziani gracze (tylko gdy serwer offline lub gdy są offline gracze)
+    # Ostatnio widziani gracze
     if last_seen_data:
         last_seen_text = ""
-        offline_count = 0
+        offline_players = []
 
         for player, last_time in last_seen_data.items():
-            if not is_online or player not in player_list:
-                if offline_count < 5:  # Pokaż max 5 graczy
-                    last_seen_text += f"{player}: {format_time(last_time)}\n"
-                offline_count += 1
+            if not is_online or player not in player_list:  # Wszyscy gracze, gdy serwer offline, albo tylko nieobecni, gdy online
+                last_seen_text += f"{player}: {format_time(last_time)}\n"
+                offline_players.append(f"{player}: {format_time(last_time)}")
 
         if last_seen_text:
-            if offline_count > 5:
-                last_seen_text += f"... i {offline_count - 5} więcej"
             embed.add_field(name="Ostatnio widziani:", value=f"```{last_seen_text}```", inline=False)
-
-    # Dla serwerów Aternos offline, dodaj informację
-    if is_aternos_offline:
-        embed.add_field(
-            name="ℹ️ Informacja",
-            value="Serwer Aternos jest wyłączony. Uruchom go przez panel Aternos.",
-            inline=False
-        )
+            logger.debug("Embed", "Dodano listę ostatnio widzianych graczy", offline_players=offline_players)
 
     # Dodaj informację o wersji bota
     embed.set_footer(text=f"Bot v{BOT_VERSION}")
@@ -1019,17 +1107,14 @@ async def check_server():
         await update_bot_status(server_data)
 
         # Aktualizuj informacje o ostatnio widzianych graczach, TYLKO jeśli serwer jest online
-        # i nie ma błędu API
-        if server_data.get("online", False) and "error" not in server_data:
+        # To zapobiega "zapominaniu" graczy, gdy API zwraca fałszywe offline
+        if server_data.get("online", False):
             player_list = server_data.get("players", {}).get("list", [])
             if player_list:  # Aktualizuj, tylko jeśli lista nie jest pusta
                 await update_last_seen(player_list)
 
-        # Przetwórz ikonę serwera (tylko jeśli nie ma błędu)
-        server_icon_data, icon_format, icon_hash = None, None, None
-        if "error" not in server_data:
-            server_icon_data, icon_format, icon_hash = await process_server_icon(server_data)
-
+        # Przetwórz ikonę serwera
+        server_icon_data, icon_format, icon_hash = await process_server_icon(server_data)
         has_valid_icon = server_icon_data is not None
 
         # Zapisz ikonę lokalnie
@@ -1157,23 +1242,19 @@ async def check_server_for_command():
         await update_bot_status(server_data)
 
         # Aktualizuj informacje o ostatnio widzianych graczach
-        # TYLKO jeśli serwer jest online i nie ma błędu API
-        if server_data.get("online", False) and "error" not in server_data:
+        if server_data.get("online", False):
             player_list = server_data.get("players", {}).get("list", [])
-            if player_list:
-                await update_last_seen(player_list)
+            await update_last_seen(player_list)
 
-        # Przetwórz ikonę serwera (tylko jeśli nie ma błędu)
-        server_icon_data, icon_format, icon_hash = None, None, None
-        if "error" not in server_data:
-            server_icon_data, icon_format, icon_hash = await process_server_icon(server_data)
-
+        # Przetwórz ikonę serwera (jeśli jest dostępna)
+        # POPRAWKA: Dodajemy trzeci parametr (icon_hash)
+        server_icon_data, icon_format, icon_hash = await process_server_icon(server_data)
         has_valid_icon = server_icon_data is not None
 
         if has_valid_icon:
             logger.debug("CommandServerIcon", f"Znaleziono ikonę w formacie {icon_format}", log_type="DATA")
         else:
-            logger.debug("CommandServerIcon", "Brak ikony serwera lub błąd API", log_type="DATA")
+            logger.debug("CommandServerIcon", "Brak ikony serwera lub serwer offline", log_type="DATA")
 
         # Utwórz nowy embed
         embed = create_minecraft_embed(server_data, last_seen)
@@ -1257,56 +1338,50 @@ async def update_bot_status(server_data):
     """
     Aktualizuje status bota Discord w zależności od stanu serwera Minecraft.
 
-    Ulepszona obsługa błędów API i serwerów Aternos.
+    Status bota jest ustawiany następująco:
+    - Online (Aktywny): Gdy serwer jest online i są jacyś gracze
+    — Idle (Zaraz wracam): Gdy serwer jest online, ale nie ma graczy
+    — DND (Nie przeszkadzać): Gdy serwer jest offline
+
+    Dodatkowo aktywność bota pokazuje liczbę graczy lub informację o stanie serwera.
+
+    Args:
+        server_data (dict): Dane o serwerze pobrane z API
     """
     try:
+        # Pobierz dostęp do zmiennej globalnej
         global max_players
-
-        # Sprawdź czy jest błąd API
-        if "error" in server_data:
-            # Jeśli mamy dane z cache, pokaż je
-            if server_data.get("online", False) and "players" in server_data:
-                player_count = server_data.get("players", {}).get("online", 0)
-                status = discord.Status.idle
-                activity_text = f"API timeout - {player_count} graczy (cache)"
-            else:
-                status = discord.Status.dnd
-                activity_text = "Błąd połączenia z API"
-
-            logger.info("BotStatus", f"Zmieniam status na {status.name} - {activity_text}", log_type="BOT")
-            activity = discord.Game(name=activity_text)
-            await client.change_presence(status=status, activity=activity)
-            return
 
         # Sprawdź status serwera
         is_online = server_data.get("online", False)
-        is_aternos_offline = server_data.get("aternos_offline", False)
 
         # Pobierz dane o graczach
         players = server_data.get("players", {})
         player_count = players.get("online", 0) if is_online else 0
-        players_max = players.get("max", max_players)
+        players_max = players.get("max", max_players)  # Używamy zmiennej globalnej jako fallback
 
         # Ustaw odpowiedni status i aktywność
         if is_online:
             if player_count > 0:
+                # Serwer online z graczami — status Aktywny
                 status = discord.Status.online
                 activity_text = f"{player_count}/{players_max} graczy online"
                 logger.info("BotStatus", f"Zmieniam status na ONLINE - {activity_text}", log_type="BOT")
             else:
+                # Serwer online bez graczy — status Zaraz wracam
                 status = discord.Status.idle
                 activity_text = "Serwer jest pusty"
                 logger.info("BotStatus", f"Zmieniam status na IDLE - {activity_text}", log_type="BOT")
         else:
+            # Serwer offline — status Nie przeszkadzać
             status = discord.Status.dnd
-            if is_aternos_offline:
-                activity_text = "Serwer Aternos wyłączony"
-            else:
-                activity_text = "Serwer offline"
+            activity_text = "Serwer offline"
             logger.info("BotStatus", f"Zmieniam status na DND - {activity_text}", log_type="BOT")
 
-        # Ustaw aktywność
+        # Ustaw aktywność - "gra w..."
         activity = discord.Game(name=activity_text)
+
+        # Aktualizuj status bota
         await client.change_presence(status=status, activity=activity)
 
     except Exception as ex:
