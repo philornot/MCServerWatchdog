@@ -1,7 +1,6 @@
 import datetime
 import json
 import os
-import re
 import sys
 
 import pytz
@@ -23,7 +22,7 @@ class PrettyLogger:
 
     # Poziomy logowania
     LEVELS = {
-        "TRACE": {"color": Fore.MAGENTA, "symbol": "🔬", "level": 5},
+        "TRACE": {"color": Fore.MAGENTA, "symbol": "🔬", "level": 9},  # Zmienione z 5 na 9
         "DEBUG": {"color": Fore.CYAN, "symbol": "🔍", "level": 10},
         "INFO": {"color": Fore.GREEN, "symbol": "ℹ️", "level": 20},
         "WARNING": {"color": Fore.YELLOW, "symbol": "⚠️", "level": 30},
@@ -40,6 +39,8 @@ class PrettyLogger:
         "CONFIG": {"color": Fore.GREEN, "symbol": "⚙️"},
         "API": {"color": Fore.CYAN, "symbol": "🌐"},
     }
+
+    # W pliku pretty_logger.py, w metodzie __init__, dodaj po importach ale przed konfiguracją:
 
     def __init__(self, log_file=None, console_level="INFO", file_level="DEBUG", timezone="Europe/Warsaw",
                  max_json_length=500, trim_lists=True, verbose_api=False):
@@ -62,6 +63,18 @@ class PrettyLogger:
         self.trim_lists = trim_lists
         self.verbose_api = verbose_api
 
+        # Zarejestruj custom poziom TRACE w systemie logowania Pythona
+        import logging
+        TRACE_LEVEL = 5
+        logging.addLevelName(TRACE_LEVEL, "TRACE")
+
+        # Dodaj metodę trace do klasy Logger
+        def trace_method(self, message, *args, **kwargs):
+            if self.isEnabledFor(TRACE_LEVEL):
+                self._log(TRACE_LEVEL, message, args, **kwargs)
+
+        logging.Logger.trace = trace_method
+
         # Przygotuj procesory dla structlog
         processors = [
             structlog.stdlib.add_log_level,
@@ -83,7 +96,6 @@ class PrettyLogger:
         self.logger = structlog.get_logger("MCServerWatchDog")
 
         # Konfiguracja handlerów
-        import logging
         stdlib_logger = logging.getLogger("MCServerWatchDog")
         stdlib_logger.setLevel(self.LEVELS[file_level]["level"] if log_file else self.LEVELS[console_level]["level"])
         stdlib_logger.handlers = []
@@ -278,7 +290,7 @@ class PrettyLogger:
     # Metody logowania
     def trace(self, module, message, log_type=None, **kwargs):
         """Log najdrobniejszych szczegółów (poziom TRACE)."""
-        self.logger.log(5, message, module=module, log_type=log_type, **kwargs)
+        self.logger.debug(f"[TRACE] {message}", module=module, log_type=log_type, **kwargs)
 
     def debug(self, module, message, log_type=None, **kwargs):
         """Log debugowania."""
